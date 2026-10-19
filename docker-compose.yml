@@ -1,0 +1,54 @@
+services:
+  fpl-rag-assistant:
+    build: .
+    image: ${FPL_IMAGE:-fpl-rag-assistant:local}
+    container_name: fpl_rag_assistant
+    ports:
+      - "127.0.0.1:8501:8501"
+    env_file:
+      - .env
+    environment:
+      FPL_SCHEDULER_MODE: external
+      SQLITE_DB_PATH: /app/data/fpl_historical.db
+      CHROMA_PERSIST_DIR: /app/data/chroma_data
+      RAW_DATA_DIR: /app/data/raw
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - ${FPL_DATA_DIR:-./data}:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      fpl-sync-worker:
+        condition: service_healthy
+
+  fpl-sync-worker:
+    image: ${FPL_IMAGE:-fpl-rag-assistant:local}
+    command: ["python", "-m", "src.sync.worker"]
+    stop_grace_period: 250s
+    environment:
+      FPL_SCHEDULER_MODE: external
+      SQLITE_DB_PATH: /app/data/fpl_historical.db
+      CHROMA_PERSIST_DIR: /app/data/chroma_data
+      RAW_DATA_DIR: /app/data/raw
+      FPL_API_BASE_URL: ${FPL_API_BASE_URL:-https://fantasy.premierleague.com/api}
+      FPL_TIMEOUT_SECONDS: ${FPL_TIMEOUT_SECONDS:-15}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_BACKOFF_FACTOR: ${RETRY_BACKOFF_FACTOR:-1.0}
+    volumes:
+      - ${FPL_DATA_DIR:-./data}:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from pathlib import Path; import sys, time; p=Path('/app/data/.fpl_scheduler_heartbeat'); sys.exit(0 if p.exists() and time.time()-p.stat().st_mtime < 90 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
