@@ -9,3 +9,9 @@ __pycache__
 .env.*
 !.env.example
 data/
+*.log
+*.log.*
+test_out.txt
+test_write.py
+.streamlit/secrets.toml
+s -ExecutionPolicy*

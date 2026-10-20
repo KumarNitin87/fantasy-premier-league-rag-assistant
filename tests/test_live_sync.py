@@ -181,3 +181,49 @@ def test_scheduler_success_callback_error_does_not_misreport_sync_failure():
     assert scheduler.status["last_sync_at"]
     assert scheduler.status["last_error"] is None
     assert scheduler.status["last_callback_error"] == "cache clear failed"
+
+
+def test_news_scheduler_runs_due_startup_sync_and_records_separate_status():
+    calls = []
+    scheduler_holder = {}
+
+    def sync_news():
+        calls.append("news")
+        scheduler_holder["scheduler"].stop()
+        return {"status": "ok", "indexed_chunks": 3}
+
+    scheduler = FPLAutoScheduler(
+        sync_callback=lambda: {"players": 0, "fixtures": 0},
+        matchday_detector=lambda: False,
+        last_sync_provider=lambda: datetime.now(timezone.utc).isoformat(),
+        news_sync_callback=sync_news,
+        last_news_sync_provider=lambda: None,
+        news_interval_seconds=6 * 60 * 60,
+    )
+    scheduler_holder["scheduler"] = scheduler
+    scheduler.start()
+    scheduler.join(timeout=2)
+
+    assert calls == ["news"]
+    assert scheduler.news_status["last_attempt_at"]
+    assert scheduler.news_status["last_success_at"]
+    assert scheduler.news_status["last_result"]["indexed_chunks"] == 3
+    assert scheduler.status["startup_check_complete"] is True
+
+
+def test_manual_news_scheduler_surfaces_source_failure_without_success_timestamp():
+    scheduler = FPLAutoScheduler(
+        sync_callback=lambda: {"players": 0, "fixtures": 0},
+        matchday_detector=lambda: False,
+        last_sync_provider=lambda: None,
+        news_sync_callback=lambda: {
+            "status": "error",
+            "error": "BBC feed unavailable",
+            "indexed_chunks": 0,
+        },
+    )
+
+    assert scheduler.run_news_now() is False
+    assert scheduler.news_status["last_attempt_at"]
+    assert scheduler.news_status["last_success_at"] is None
+    assert scheduler.news_status["last_error"] == "BBC feed unavailable"

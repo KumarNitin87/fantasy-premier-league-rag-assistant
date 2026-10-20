@@ -21,13 +21,13 @@ from src.analytics.squad_intelligence import (
 )
 from src.analytics.transfer_eval import TransferAnalyzer
 from src.database.models import Player, SquadMember
-from src.rag.assistant_service import _source_date, _source_url
+from src.rag.source_metadata import source_date, source_url
 from ui.components.player_photo import resolve_player_photo_urls
 from ui.components.score_card import render_score_card
 
 
 def render_my_team(repo, scoring_engine: DecisionScoringEngine, transfer_analyzer: TransferAnalyzer,
-                   captain_picker: CaptainPicker, vector_store, llm_provider, retriever):
+                   captain_picker: CaptainPicker, vector_store, retriever):
     st.header("🏆 My Team")
     st.caption("Manage your squad and use the same FPL data, fixture ratings, scoring engine, and news evidence as the rest of the dashboard.")
     saved_members = repo.get_my_team()
@@ -45,7 +45,7 @@ def render_my_team(repo, scoring_engine: DecisionScoringEngine, transfer_analyze
             _render_squad_summary(saved_members, settings, repo, scoring_engine)
 
     with tabs[1]:
-        _render_gameweek_analysis(repo, saved_players, settings, scoring_engine, captain_picker, vector_store, llm_provider, player_by_id)
+        _render_gameweek_analysis(repo, saved_players, settings, scoring_engine, captain_picker, vector_store, player_by_id)
 
     with tabs[2]:
         _render_starting_xi(repo, saved_players, scoring_engine, saved_members)
@@ -199,7 +199,7 @@ def _render_position_group(title, players, result):
         st.markdown(f"- **{player.web_name}** · {player.team_short_name or player.team_name} · Score {result.scores[player.id]:.1f}/100 · {_availability(player)}")
 
 
-def _render_gameweek_analysis(repo, players, settings, scoring, captain_picker, vector_store, llm_provider, player_by_id):
+def _render_gameweek_analysis(repo, players, settings, scoring, captain_picker, vector_store, player_by_id):
     st.subheader("Analyze My Gameweek")
     valid, issues = validate_squad(players)
     if not valid:
@@ -207,7 +207,10 @@ def _render_gameweek_analysis(repo, players, settings, scoring, captain_picker, 
         return
     if st.button("⭐ Analyze My Gameweek", type="primary", key="analyze_my_gameweek"):
         with st.spinner("Analyzing squad form, fixtures, risk, and relevant indexed news…"):
-            report = build_squad_report(players, repo, scoring, captain_picker, vector_store, llm_provider, bank_millions=settings["bank_millions"])
+            report = build_squad_report(
+                players, repo, scoring, captain_picker, vector_store,
+                bank_millions=settings["bank_millions"],
+            )
         st.session_state["phase4_report"] = report
     report = st.session_state.get("phase4_report")
     if not report:
@@ -249,13 +252,9 @@ def _render_gameweek_analysis(repo, players, settings, scoring, captain_picker, 
             st.markdown(f"**{player.web_name if player else player_id}:** {_availability(player) if player else 'Status unavailable'} · {info.get('injury_problem') or 'Problem not available'} · Expected return: {info.get('expected_return_date') or 'Not publicly available'} · Expected Matchweek: {('MW' + str(info.get('matchweek'))) if info.get('matchweek') else 'Not available'}")
             if source:
                 url = source.get("url") or metadata.get("link") or metadata.get("url")
-                source_label = f"{source.get('source') or metadata.get('source') or 'Source unavailable'} · {_source_date(metadata) or 'Date unavailable'}"
+                source_label = f"{source.get('source') or metadata.get('source') or 'Source unavailable'} · {source_date(metadata) or 'Date unavailable'}"
                 st.markdown(f"Source: [{source_label}]({url})" if url and str(url).startswith(("http://", "https://")) else f"Source: {source_label} · URL not available")
     _render_evidence(report.evidence)
-    st.markdown("### Gemini / offline explanation")
-    st.write(report.explanation or "No explanation was generated.")
-
-
 def _render_evidence(evidence):
     if not evidence:
         st.info("No relevant recent squad news evidence was found.")
@@ -263,9 +262,9 @@ def _render_evidence(evidence):
     for idx, doc in enumerate(evidence[:10], 1):
         metadata = doc.get("metadata", {})
         source = metadata.get("source") or "Unknown source"
-        published = _source_date(metadata) or "Date unavailable"
+        published = source_date(metadata) or "Date unavailable"
         title = metadata.get("title") or source
-        url = _source_url(doc)
+        url = source_url(doc)
         st.markdown(f"[{title} — {source} · {published}]({url})" if url else f"**{title} — {source} · {published}**")
         with st.expander(f"Evidence {idx}"):
             st.write(doc.get("text", ""))

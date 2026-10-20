@@ -22,7 +22,7 @@ class RSSNewsClient:
 
     DEFAULT_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 FPL-RAG-Assistant/1.0"
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 PL-Fantasy-Predictor/1.0"
     )
 
     def __init__(
@@ -34,6 +34,10 @@ class RSSNewsClient:
         self.feeds = feeds or DEFAULT_RSS_FEEDS
         self.timeout = timeout
         self.user_agent = user_agent
+        self.last_errors: List[str] = []
+        self.last_attempted_feeds = 0
+        self.last_successful_feeds = 0
+        self._last_fetch_error: Optional[str] = None
 
         # Set up resilient requests session
         self.session = requests.Session()
@@ -56,22 +60,30 @@ class RSSNewsClient:
         """
         all_articles: List[Dict[str, Any]] = []
         seen_fingerprints: Set[str] = set()
+        self.last_errors = []
+        self.last_attempted_feeds = len(self.feeds)
+        self.last_successful_feeds = 0
 
         for source_name, feed_url in self.feeds.items():
             try:
                 logger.info("Fetching RSS feed: '%s' (%s)", source_name, feed_url)
+                self._last_fetch_error = None
                 raw_xml = self._fetch_feed_content(feed_url)
 
-                if raw_xml:
-                    feed = feedparser.parse(raw_xml)
-                else:
-                    # Fallback directly to feedparser url handling
-                    feed = feedparser.parse(feed_url)
+                if not raw_xml:
+                    error = self._last_fetch_error or "Empty feed response"
+                    self.last_errors.append(f"{source_name}: {error}")
+                    logger.warning("Feed '%s' could not be fetched: %s", source_name, error)
+                    continue
+                feed = feedparser.parse(raw_xml)
 
                 if getattr(feed, "bozo", False) and not feed.entries:
-                    logger.warning("Feed '%s' returned invalid XML or error: %s", source_name, getattr(feed, "bozo_exception", "Unknown"))
+                    error = getattr(feed, "bozo_exception", "Invalid or unavailable feed response")
+                    self.last_errors.append(f"{source_name}: {type(error).__name__}")
+                    logger.warning("Feed '%s' returned invalid XML or error: %s", source_name, error)
                     continue
 
+                self.last_successful_feeds += 1
                 entries = feed.entries[:max_per_feed]
                 valid_count = 0
                 for entry in entries:
@@ -85,6 +97,7 @@ class RSSNewsClient:
                 logger.info("Successfully parsed %d unique articles from '%s'", valid_count, source_name)
 
             except Exception as e:
+                self.last_errors.append(f"{source_name}: {type(e).__name__}")
                 logger.warning("Failed to fetch RSS from '%s': %s (skipping and continuing)", source_name, e)
 
         return all_articles
@@ -95,9 +108,11 @@ class RSSNewsClient:
             resp = self.session.get(url, timeout=self.timeout)
             if resp.status_code == 200 and resp.text.strip():
                 return resp.text
+            self._last_fetch_error = f"HTTP {resp.status_code}"
             logger.debug("HTTP %s when fetching feed %s", resp.status_code, url)
         except Exception as err:
-            logger.debug("Direct request failed for %s: %s; falling back to feedparser", url, err)
+            self._last_fetch_error = type(err).__name__
+            logger.debug("Direct request failed for %s: %s", url, err)
         return None
 
     @staticmethod
