@@ -10,6 +10,7 @@ from config.settings import settings
 from src.database.connection import init_db
 from src.database.repository import FPLRepository
 from src.ingestion.sync_fpl import FPLSyncPipeline
+from src.ingestion.sync_news import NewsIngestionPipeline
 from src.sync.auto_scheduler import FPLAutoScheduler, detect_matchday
 
 logger = logging.getLogger("fpl_sync_worker")
@@ -25,8 +26,8 @@ def main() -> None:
     init_db(settings.SQLITE_DB_PATH)
     repository = FPLRepository()
     heartbeat = settings.SQLITE_DB_PATH.parent / ".fpl_scheduler_heartbeat"
-    heartbeat.unlink(missing_ok=True)
     stopped = threading.Event()
+    news_pipeline = None
 
     def request_stop(_signum, _frame):
         stopped.set()
@@ -39,29 +40,41 @@ def main() -> None:
             allow_fallback=False,
         )
 
+    def sync_news():
+        nonlocal news_pipeline
+        if news_pipeline is None:
+            news_pipeline = NewsIngestionPipeline(repository=repository)
+        return news_pipeline.run(max_per_feed=settings.MAX_NEWS_ITEMS_PER_FEED)
+
     scheduler = FPLAutoScheduler(
         sync_callback=sync_fpl,
         matchday_detector=lambda: detect_matchday(repository),
         last_sync_provider=lambda: repository.get_db_stats().get("last_sync"),
+        news_sync_callback=sync_news,
+        last_news_sync_provider=lambda: repository.get_db_stats().get("last_news_attempt_at"),
+        news_interval_seconds=settings.NEWS_REFRESH_INTERVAL_HOURS * 60 * 60,
     )
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+    try:
+        heartbeat.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    except OSError:
+        logger.exception("Could not write initial scheduler heartbeat at %s.", heartbeat)
     scheduler.start()
-    logger.info("Standalone FPL scheduler worker started.")
+    logger.info("Standalone FPL and news scheduler worker started.")
 
     while not stopped.is_set():
         if not scheduler.is_alive():
             logger.error("Scheduler thread stopped unexpectedly; terminating for container restart.")
             raise RuntimeError("FPL scheduler thread stopped unexpectedly.")
-        if scheduler.status.get("startup_check_complete"):
-            try:
-                heartbeat.write_text(
-                    datetime.now(timezone.utc).isoformat(),
-                    encoding="utf-8",
-                )
-            except OSError:
-                logger.exception("Could not update scheduler heartbeat at %s.", heartbeat)
+        try:
+            heartbeat.write_text(
+                datetime.now(timezone.utc).isoformat(),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("Could not update scheduler heartbeat at %s.", heartbeat)
         stopped.wait(HEARTBEAT_INTERVAL_SECONDS)
 
     scheduler.join(timeout=90)

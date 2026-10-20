@@ -1,5 +1,5 @@
 """
-FPL Auto-Sync Scheduler
+FPL and news auto-sync scheduler.
 
 Runs in a background daemon thread while the Streamlit application is active.
 Automatically refreshes FPL data at intervals appropriate to the current schedule:
@@ -20,10 +20,8 @@ Design guarantees:
 Lifecycle
 ---------
 Call get_scheduler() once (it is @st.cache_resource, so only one instance exists per
-Streamlit server process).  Call scheduler.start() from the sidebar so the thread is
-launched after the Streamlit cache_resource objects are ready.
-The scheduler exposes .status dict for the UI and .request_immediate_sync() for the
-manual-refresh button.
+Streamlit server process). The scheduler runs FPL polling and due news jobs in its process.
+News has an independent interval, lock, and status record.
 """
 
 import logging
@@ -44,7 +42,7 @@ STARTUP_STALE_THRESHOLD_SECONDS = 30 * 60  # re-sync on startup if data > 30 min
 
 class FPLAutoScheduler:
     """
-    Background daemon thread that calls sync_callback on schedule.
+    Background daemon thread that calls FPL and optional news callbacks on schedule.
 
     Parameters
     ----------
@@ -68,13 +66,22 @@ class FPLAutoScheduler:
         matchday_detector: Callable[[], bool],
         last_sync_provider: Callable[[], Optional[str]],
         on_sync_success: Optional[Callable[[Dict[str, Any]], None]] = None,
+        news_sync_callback: Optional[Callable[[], Dict[str, Any]]] = None,
+        last_news_sync_provider: Optional[Callable[[], Optional[str]]] = None,
+        news_interval_seconds: int = 6 * 60 * 60,
+        on_news_sync_success: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self._sync_callback = sync_callback
         self._matchday_detector = matchday_detector
         self._last_sync_provider = last_sync_provider
         self._on_sync_success = on_sync_success
+        self._news_sync_callback = news_sync_callback
+        self._last_news_sync_provider = last_news_sync_provider
+        self._news_interval_seconds = news_interval_seconds
+        self._on_news_sync_success = on_news_sync_success
 
         self._lock = threading.Lock()  # re-entrant guard
+        self._news_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._immediate_flag = threading.Event()  # set to trigger immediate sync
@@ -88,6 +95,14 @@ class FPLAutoScheduler:
             "syncing_now": False,
             "mode": "unknown",           # "matchday" or "non-matchday"
             "startup_check_complete": False,
+        }
+        self.news_status: Dict[str, Any] = {
+            "last_attempt_at": None,
+            "last_success_at": None,
+            "last_partial_at": None,
+            "last_error": None,
+            "last_result": {},
+            "syncing_now": False,
         }
 
     # ------------------------------------------------------------------
@@ -127,6 +142,10 @@ class FPLAutoScheduler:
         """
         self._immediate_flag.set()
 
+    def run_news_now(self) -> bool:
+        """Run a manual news sync unless another news sync is already active."""
+        return self._execute_news_sync(propagate_errors=True)
+
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
@@ -143,6 +162,10 @@ class FPLAutoScheduler:
             self._startup_freshness_check()
         except Exception as exc:
             logger.warning("Startup freshness check failed: %s", exc)
+        try:
+            self._startup_news_freshness_check()
+        except Exception as exc:
+            logger.warning("News startup freshness check failed: %s", exc)
         finally:
             self.status["startup_check_complete"] = True
 
@@ -160,11 +183,15 @@ class FPLAutoScheduler:
                 if woken_early or self._immediate_flag.is_set():
                     self._immediate_flag.clear()
                     break
+                if self._news_sync_is_due():
+                    self._do_news_sync()
 
             if self._stop_event.is_set():
                 break
 
             self._do_sync()
+            if self._news_sync_is_due():
+                self._do_news_sync()
 
         self.status["running"] = False
         logger.info("FPLAutoScheduler thread stopped.")
@@ -201,6 +228,79 @@ class FPLAutoScheduler:
     def _do_sync(self) -> None:
         """Execute one sync cycle, honouring the re-entrant guard."""
         self._execute_sync(propagate_errors=False)
+
+    def _startup_news_freshness_check(self) -> None:
+        if not self._news_sync_callback:
+            return
+        last_attempt = self._safe_last_news_sync()
+        if not last_attempt or last_attempt == "Never" or self._timestamp_age(last_attempt) > self._news_interval_seconds:
+            logger.info("News data is missing or stale; running startup news synchronization.")
+            self._do_news_sync()
+
+    def _news_sync_is_due(self) -> bool:
+        if not self._news_sync_callback:
+            return False
+        last_attempt = self._safe_last_news_sync()
+        return (
+            not last_attempt
+            or last_attempt == "Never"
+            or self._timestamp_age(last_attempt) >= self._news_interval_seconds
+        )
+
+    @staticmethod
+    def _timestamp_age(timestamp: str) -> float:
+        try:
+            value = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - value).total_seconds())
+        except (TypeError, ValueError):
+            return float("inf")
+
+    def _do_news_sync(self) -> None:
+        self._execute_news_sync(propagate_errors=False)
+
+    def _execute_news_sync(self, propagate_errors: bool) -> bool:
+        if not self._news_sync_callback:
+            return False
+        if not self._news_lock.acquire(blocking=False):
+            logger.info("News sync already in progress — skipping this cycle.")
+            return False
+        self.news_status["syncing_now"] = True
+        self.news_status["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            result = self._news_sync_callback()
+            self.news_status["last_result"] = result
+            result_status = result.get("status", "ok")
+            if result_status == "error":
+                error = result.get("error") or "No configured news feed completed successfully."
+                self.news_status["last_error"] = error
+                logger.warning("Scheduled news sync failed: %s", error)
+                return False
+
+            if result_status == "partial":
+                self.news_status["last_partial_at"] = datetime.now(timezone.utc).isoformat()
+                self.news_status["last_error"] = result.get("error")
+            else:
+                self.news_status["last_success_at"] = datetime.now(timezone.utc).isoformat()
+                self.news_status["last_error"] = None
+            if self._on_news_sync_success:
+                try:
+                    self._on_news_sync_success(result)
+                    self.news_status["last_callback_error"] = None
+                except Exception as callback_error:
+                    self.news_status["last_callback_error"] = str(callback_error)
+                    logger.exception("on_news_sync_success callback failed.")
+            return True
+        except Exception as exc:
+            self.news_status["last_error"] = str(exc)
+            logger.error("News sync cycle failed: %s", exc)
+            if propagate_errors:
+                raise
+            return False
+        finally:
+            self.news_status["syncing_now"] = False
+            self._news_lock.release()
 
     def run_sync_now(self) -> bool:
         """Run a manual sync immediately unless another sync is already active."""
@@ -256,6 +356,15 @@ class FPLAutoScheduler:
             return self._last_sync_provider()
         except Exception as exc:
             logger.warning("last_sync_provider raised: %s", exc)
+            return None
+
+    def _safe_last_news_sync(self) -> Optional[str]:
+        if not self._last_news_sync_provider:
+            return self.news_status.get("last_attempt_at")
+        try:
+            return self._last_news_sync_provider()
+        except Exception as exc:
+            logger.warning("last_news_sync_provider raised: %s", exc)
             return None
 
 

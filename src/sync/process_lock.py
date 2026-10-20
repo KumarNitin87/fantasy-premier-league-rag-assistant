@@ -3,13 +3,15 @@
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import ContextManager, Iterator
 
 
 @contextmanager
-def acquire_fpl_sync_lock(database_path: Path) -> Iterator[bool]:
-    """Try to hold a non-blocking OS lock shared by the web app and sync worker."""
-    lock_path = Path(f"{database_path}.fpl-sync.lock")
+def acquire_sync_lock(database_path: Path, sync_name: str) -> Iterator[bool]:
+    """Try to hold a non-blocking OS lock shared by web and worker processes."""
+    if not sync_name.isidentifier():
+        raise ValueError("sync_name must be a simple identifier")
+    lock_path = Path(f"{database_path}.{sync_name}-sync.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_file:
         lock_file.seek(0, os.SEEK_END)
@@ -44,3 +46,13 @@ def acquire_fpl_sync_lock(database_path: Path) -> Iterator[bool]:
             yield True
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_fpl_sync_lock(database_path: Path) -> ContextManager[bool]:
+    """Lock FPL synchronization across the web app and scheduler worker."""
+    return acquire_sync_lock(database_path, "fpl")
+
+
+def acquire_news_sync_lock(database_path: Path) -> ContextManager[bool]:
+    """Lock news/vector ingestion across manual and scheduled callers."""
+    return acquire_sync_lock(database_path, "news")

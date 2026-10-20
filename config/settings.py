@@ -3,7 +3,7 @@ Application Configuration and Environment Settings using Pydantic Settings.
 """
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,28 +21,10 @@ class Settings(BaseSettings):
     )
 
     # Project Information
-    APP_NAME: str = "Fantasy Football & Premier League RAG Assistant"
+    APP_NAME: str = "PL Fantasy Predictor"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
-    # Primary LLM Provider
-    LLM_PROVIDER: Literal["gemini", "openai", "groq", "ollama", "mock"] = "gemini"
-
-    # API Keys & Models
-    GEMINI_API_KEY: Optional[str] = Field(default=None)
-    GEMINI_MODEL: str = "gemini-1.5-flash"
-
-    OPENAI_API_KEY: Optional[str] = Field(default=None)
-    OPENAI_MODEL: str = "gpt-4o-mini"
-
-    GROQ_API_KEY: Optional[str] = Field(default=None)
-    GROQ_MODEL: str = "llama-3.1-70b-versatile"
-
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3"
-
-    # Offline / Mock Fallback Flag
-    OFFLINE_MOCK_MODE: bool = False
     FPL_SCHEDULER_MODE: Literal["embedded", "external"] = "embedded"
 
     # Storage Paths
@@ -61,8 +43,8 @@ class Settings(BaseSettings):
     RETRY_BACKOFF_FACTOR: float = 1.0
 
     # News Ingestion Settings
-    NEWS_REFRESH_INTERVAL_HOURS: int = 6
-    MAX_NEWS_ITEMS_PER_FEED: int = 25
+    NEWS_REFRESH_INTERVAL_HOURS: int = Field(default=6, ge=1)
+    MAX_NEWS_ITEMS_PER_FEED: int = Field(default=25, ge=1)
     CHUNK_SIZE: int = 400
     CHUNK_OVERLAP: int = 60
 

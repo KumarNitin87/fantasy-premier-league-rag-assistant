@@ -1,5 +1,5 @@
 """
-Fantasy Football & Premier League RAG Assistant
+PL Fantasy Predictor
 Main Streamlit Application Entrypoint.
 """
 
@@ -9,7 +9,7 @@ import time
 
 # Streamlit Page Configuration
 st.set_page_config(
-    page_title="FPL & Premier League RAG Assistant",
+    page_title="PL Fantasy Predictor",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -198,7 +198,6 @@ from src.rag.retriever import HybridRetriever
 from src.analytics.scoring import DecisionScoringEngine
 from src.analytics.transfer_eval import TransferAnalyzer
 from src.analytics.captain_picker import CaptainPicker
-from src.llm.factory import get_llm_provider
 from src.ingestion.sync_fpl import FPLSyncPipeline
 from src.ingestion.sync_news import NewsIngestionPipeline
 from src.sync.auto_scheduler import FPLAutoScheduler, detect_matchday
@@ -256,11 +255,27 @@ def get_scheduler() -> FPLAutoScheduler:
         get_scoring_engine().refresh_team_context()
         st.cache_data.clear()
 
+    def _sync_news_callback():
+        return NewsIngestionPipeline(
+            vector_store=get_vector_store(),
+            repository=_repo,
+        ).run(max_per_feed=settings.MAX_NEWS_ITEMS_PER_FEED)
+
+    def _last_news_attempt_provider():
+        return _repo.get_db_stats().get("last_news_attempt_at")
+
+    def _on_news_sync_success(_result):
+        st.cache_data.clear()
+
     scheduler = FPLAutoScheduler(
         sync_callback=_sync_callback,
         matchday_detector=_matchday_detector,
         last_sync_provider=_last_sync_provider,
         on_sync_success=_on_sync_success,
+        news_sync_callback=_sync_news_callback,
+        last_news_sync_provider=_last_news_attempt_provider,
+        news_interval_seconds=settings.NEWS_REFRESH_INTERVAL_HOURS * 60 * 60,
+        on_news_sync_success=_on_news_sync_success,
     )
     if settings.FPL_SCHEDULER_MODE == "embedded":
         scheduler.start()
@@ -277,16 +292,23 @@ captain_picker = get_captain_picker()
 retriever = HybridRetriever(vector_store=vector_store, repository=repo)
 scheduler = get_scheduler()  # ensures background thread starts on first load
 
-if "_visible_fpl_sync_at" not in st.session_state:
-    st.session_state["_visible_fpl_sync_at"] = repo.get_db_stats().get("last_sync")
+if "_visible_fpl_attempt_at" not in st.session_state:
+    st.session_state["_visible_fpl_attempt_at"] = repo.get_db_stats().get("last_fpl_attempt_at")
+if "_visible_news_attempt_at" not in st.session_state:
+    st.session_state["_visible_news_attempt_at"] = repo.get_db_stats().get("last_news_attempt_at")
 
 
 @st.fragment(run_every="30s")
 def _refresh_after_fpl_sync():
-    """Rerun the dashboard when a background sync has committed new FPL data."""
-    latest_sync = repo.get_db_stats().get("last_sync")
-    if latest_sync and latest_sync != st.session_state.get("_visible_fpl_sync_at"):
-        st.session_state["_visible_fpl_sync_at"] = latest_sync
+    """Rerun the dashboard when a background sync commits FPL or news data."""
+    sync_status = repo.get_db_stats()
+    latest_fpl_attempt = sync_status.get("last_fpl_attempt_at")
+    latest_news_attempt = sync_status.get("last_news_attempt_at")
+    fpl_updated = latest_fpl_attempt and latest_fpl_attempt != st.session_state.get("_visible_fpl_attempt_at")
+    news_updated = latest_news_attempt and latest_news_attempt != st.session_state.get("_visible_news_attempt_at")
+    if fpl_updated or news_updated:
+        st.session_state["_visible_fpl_attempt_at"] = latest_fpl_attempt
+        st.session_state["_visible_news_attempt_at"] = latest_news_attempt
         st.cache_data.clear()
         st.rerun()
 
@@ -302,13 +324,12 @@ PAGE_OPTIONS = [
     "⚔️ Player Comparison",
     "🔄 Transfer & Captain Advisor",
     "📰 News & Injury Radar",
-    "💬 AI RAG Assistant",
     "📈 Dashboard",
     "🏆 My Team",
 ]
 
 with st.sidebar:
-    st.markdown("## ⚽ FPL RAG Assistant")
+    st.markdown("## ⚽ PL Fantasy Predictor")
     st.caption("Fantasy Football Decision Support")
     st.markdown("---")
     st.markdown("#### NAVIGATION")
@@ -367,7 +388,7 @@ with st.sidebar:
                 try:
                     if scheduler.run_sync_now():
                         res = scheduler.status.get("last_result", {})
-                        st.session_state["_visible_fpl_sync_at"] = repo.get_db_stats().get("last_sync")
+                        st.session_state["_visible_fpl_attempt_at"] = repo.get_db_stats().get("last_fpl_attempt_at")
                         st.success(f"✅ Synced {res.get('players', 0)} players & {res.get('fixtures', 0)} fixtures!")
                         st.rerun()
                     else:
@@ -375,12 +396,30 @@ with st.sidebar:
                 except Exception as exc:
                     st.error(f"FPL sync failed: {exc}. Existing data preserved.")
 
-        if st.button("📰 Fetch Latest News & Injuries", use_container_width=True):
+        news_syncing = scheduler.news_status.get("syncing_now", False)
+        if st.button(
+            "⏸️ News sync running…" if news_syncing else "📰 Fetch Latest News & Injuries",
+            use_container_width=True,
+            disabled=news_syncing,
+            key="manual_news_sync_btn",
+        ):
             with st.spinner("Fetching news and updating vector embeddings…"):
                 try:
-                    n_pipeline = NewsIngestionPipeline(vector_store=vector_store, repository=repo)
-                    result = n_pipeline.run(max_per_feed=25)
-                    st.success(f"Indexed {result['indexed_chunks']} fresh news chunks!")
+                    completed = scheduler.run_news_now()
+                    result = scheduler.news_status.get("last_result", {})
+                    if result.get("status") == "error":
+                        st.error(f"News sync reported an upstream failure: {result.get('error', 'No configured feed succeeded')}")
+                    elif result.get("status") == "partial":
+                        st.warning(
+                            f"News sync indexed {result.get('indexed_chunks', 0)} chunks, "
+                            f"but some feeds failed: {result.get('error', 'Check sync status')}"
+                        )
+                    elif completed:
+                        st.success(f"Indexed {result.get('indexed_chunks', 0)} fresh news chunks!")
+                    else:
+                        st.warning("A news sync is already in progress.")
+                    if result.get("indexed_chunks", 0):
+                        st.cache_data.clear()
                     st.rerun()
                 except Exception as exc:
                     st.error(f"News sync failed: {exc}")
@@ -406,50 +445,23 @@ with st.sidebar:
         news_err = sync_status.get('last_news_error', '')
         st.markdown(f"**News Sync:** `{news_sync_time}`")
         st.caption(f"Last news attempt: `{sync_status.get('last_news_attempt_at') or 'Never'}`")
-        if news_status == 'error':
+        if news_status in ('error', 'partial'):
             st.caption(f"⚠️ Last News attempt error: {news_err}")
         elif news_status == 'ok':
             st.caption("✅ News status: Healthy")
 
         st.caption(f"News vectors: {vector_store.count()}")
         if settings.FPL_SCHEDULER_MODE == "external":
-            st.caption("ℹ️ FPL worker schedule: every 15 min on matchdays, 6 h otherwise.")
+            st.caption(
+                f"ℹ️ Worker schedule: FPL every 15 min on matchdays / 6 h otherwise; "
+                f"news every {settings.NEWS_REFRESH_INTERVAL_HOURS} h."
+            )
         else:
             st.caption(
                 "ℹ️ Auto-sync: every 15 min on matchdays, 6 h otherwise. "
+                f"News and injury ingestion runs every {settings.NEWS_REFRESH_INTERVAL_HOURS} h. "
                 "Sync stops when the Streamlit server process exits."
             )
-
-    with st.expander("⚙️ Settings & AI Configuration", expanded=False):
-        provider_choice = st.selectbox(
-            "LLM Provider",
-            ["Google Gemini", "Offline Mock Reasoner", "OpenAI", "Groq", "Ollama"],
-            index=0 if settings.LLM_PROVIDER == "gemini" else 1,
-            key="llm_provider_choice",
-        )
-
-        gemini_key_input = ""
-        if provider_choice == "Google Gemini":
-            gemini_key_input = st.text_input(
-                "Gemini API Key",
-                type="password",
-                value=settings.GEMINI_API_KEY or "",
-                key="gemini_api_key_input",
-                help="Free key available from https://aistudio.google.com/",
-            )
-
-        provider_name = "gemini" if "Gemini" in provider_choice else "mock"
-        llm_provider = get_llm_provider(
-            provider_name=provider_name,
-            api_key=gemini_key_input or settings.GEMINI_API_KEY,
-        )
-        is_offline = provider_name == "mock" or "mock" in llm_provider.name.casefold()
-        st.markdown(f"**Active Reasoner:** `{llm_provider.name}`")
-        if is_offline:
-            st.info("Offline/mock reasoning is active.")
-        elif not gemini_key_input and not settings.GEMINI_API_KEY:
-            st.info("No Gemini key configured; the provider will use offline/mock fallback.")
-        st.caption("Embeddings: all-MiniLM-L6-v2 (384d)")
 
 # =============================================================================
 # Render the selected existing page (no duplicate page implementations)
@@ -476,18 +488,9 @@ try:
         from ui.views.news_feed import render_news_feed
         render_news_feed(vector_store=vector_store, repo=repo, retriever=retriever)
     elif selected_page == PAGE_OPTIONS[5]:
-        from ui.views.rag_assistant import render_rag_assistant
-        render_rag_assistant(
-            retriever=retriever,
-            llm_provider=llm_provider,
-            scoring_engine=scoring_engine,
-            transfer_analyzer=transfer_analyzer,
-            captain_picker=captain_picker,
-        )
-    elif selected_page == PAGE_OPTIONS[6]:
         from ui.views.phase2_dashboard import render_phase2_dashboard
         render_phase2_dashboard(repo=repo, scoring_engine=scoring_engine)
-    elif selected_page == PAGE_OPTIONS[7]:
+    elif selected_page == PAGE_OPTIONS[6]:
         from ui.views.my_team import render_my_team
         render_my_team(
             repo=repo,
@@ -495,7 +498,6 @@ try:
             transfer_analyzer=transfer_analyzer,
             captain_picker=captain_picker,
             vector_store=vector_store,
-            llm_provider=llm_provider,
             retriever=retriever,
         )
 except ImportError as exc:

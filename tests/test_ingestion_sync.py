@@ -7,6 +7,8 @@ import pytest
 from src.ingestion import sync_fpl as sync_fpl_module
 from src.ingestion.sync_fpl import FPLSyncPipeline
 from src.ingestion.sync_news import NewsIngestionPipeline
+from src.api.rss_client import RSSNewsClient
+from src.sync.process_lock import acquire_news_sync_lock
 
 
 class RecordingRepository:
@@ -93,8 +95,9 @@ class EmptyVectorStore:
         return 0
 
 
-def make_news_pipeline(fail=False):
+def make_news_pipeline(tmp_path, fail=False):
     repository = RecordingRepository()
+    repository.db_path = tmp_path / "news-test.db"
     pipeline = NewsIngestionPipeline.__new__(NewsIngestionPipeline)
     pipeline.repo = repository
     pipeline.rss_client = EmptyRSSClient()
@@ -102,8 +105,8 @@ def make_news_pipeline(fail=False):
     return pipeline, repository
 
 
-def test_news_sync_records_successful_completion():
-    pipeline, repository = make_news_pipeline()
+def test_news_sync_records_successful_completion(tmp_path):
+    pipeline, repository = make_news_pipeline(tmp_path)
 
     result = pipeline.run(max_per_feed=1)
 
@@ -116,8 +119,8 @@ def test_news_sync_records_successful_completion():
     assert repository.logs[0]["completed_at"]
 
 
-def test_news_sync_records_failure_and_preserves_exception():
-    pipeline, repository = make_news_pipeline(fail=True)
+def test_news_sync_records_failure_and_preserves_exception(tmp_path):
+    pipeline, repository = make_news_pipeline(tmp_path, fail=True)
 
     with pytest.raises(RuntimeError, match="vector upsert failed"):
         pipeline.run(max_per_feed=1)
@@ -126,6 +129,77 @@ def test_news_sync_records_failure_and_preserves_exception():
     assert repository.logs[0]["sync_type"] == "news"
     assert repository.logs[0]["status"] == "error"
     assert repository.logs[0]["error"] == "RuntimeError: vector upsert failed"
+
+
+def test_news_sync_records_partial_feed_failure_without_claiming_full_success(tmp_path):
+    pipeline, repository = make_news_pipeline(tmp_path)
+    pipeline.rss_client.last_errors = ["BBC Sport: OSError"]
+    pipeline.rss_client.last_successful_feeds = 1
+
+    result = pipeline.run(max_per_feed=1)
+
+    assert result["status"] == "partial"
+    assert result["error"] == "BBC Sport: OSError"
+    assert repository.logs[0]["status"] == "partial"
+    assert repository.logs[0]["error"] == "BBC Sport: OSError"
+
+
+def test_news_sync_records_all_feed_failures_as_error(tmp_path):
+    pipeline, repository = make_news_pipeline(tmp_path)
+    pipeline.rss_client.last_errors = ["BBC Sport: OSError"]
+    pipeline.rss_client.last_successful_feeds = 0
+
+    result = pipeline.run(max_per_feed=1)
+
+    assert result["status"] == "error"
+    assert result["error"] == "BBC Sport: OSError"
+    assert repository.logs[0]["status"] == "error"
+
+
+def test_rss_client_does_not_use_unbounded_parser_network_fallback(monkeypatch):
+    client = RSSNewsClient(feeds={"Test Feed": "https://example.test/rss"})
+
+    def fail_fetch(_url):
+        client._last_fetch_error = "HTTP 503"
+        return None
+
+    client._fetch_feed_content = fail_fetch
+    monkeypatch.setattr("src.api.rss_client.feedparser.parse", lambda *_args: pytest.fail("unexpected network fallback"))
+
+    assert client.fetch_all_articles() == []
+    assert client.last_errors == ["Test Feed: HTTP 503"]
+    assert client.last_successful_feeds == 0
+
+
+def test_news_sync_preserves_missing_publication_date(tmp_path):
+    pipeline, _repository = make_news_pipeline(tmp_path)
+    pipeline.rss_client.fetch_all_articles = lambda **_kwargs: [{
+        "title": "A dated claim without a date",
+        "summary": "Source content",
+        "source": "Test Feed",
+        "link": "https://example.test/article",
+    }]
+    captured = []
+
+    class RecordingChunker:
+        def chunk_article(self, **kwargs):
+            captured.append(kwargs["published_at"])
+            return [{"id": "test", "text": kwargs["title"], "metadata": {}}]
+
+    pipeline.chunker = RecordingChunker()
+
+    pipeline.run(max_per_feed=1)
+
+    assert captured == [""]
+
+
+def test_news_sync_lock_blocks_overlapping_jobs(tmp_path):
+    db_path = tmp_path / "lock-test.db"
+
+    with acquire_news_sync_lock(db_path) as first_acquired:
+        assert first_acquired is True
+        with acquire_news_sync_lock(db_path) as second_acquired:
+            assert second_acquired is False
 
 
 def test_fpl_api_timeout_error_handling(monkeypatch):

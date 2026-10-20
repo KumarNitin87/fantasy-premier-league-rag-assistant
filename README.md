@@ -1,6 +1,6 @@
-# ⚽ Fantasy Football & Premier League RAG Assistant
+# ⚽ PL Fantasy Predictor
 
-A production-quality Decision Support System and Conversational RAG Assistant for Fantasy Premier League (FPL) managers. This application bridges **deterministic quantitative performance metrics** (xG, xA, FDR, ICT Index) with **unstructured real-time qualitative context** (press conference quotes, BBC/Sky Sports news, injury updates) using a hybrid RAG architecture.
+A deterministic decision-support dashboard for Fantasy Premier League (FPL) managers. It combines official FPL statistics, fixtures, historical gameweek data, player analytics, squad planning, and source-linked football news and injury records. No Gemini API key or conversational AI service is required.
 
 ---
 
@@ -11,11 +11,11 @@ A production-quality Decision Support System and Conversational RAG Assistant fo
 3. **⚔️ Head-to-Head Player Comparison**: Interactive 6-dimensional Plotly radar chart and side-by-side metric comparison table with winning badges.
 4. **🔁 Transfer Decision Evaluator**: Evaluates Player OUT vs Player IN moves, checking bank affordability, schedule swing, expected point delta, and confidence gain.
 5. **👑 Captaincy Optimizer (MCDA)**: Multi-criteria decision analysis ranking the top 5 captain picks using form, fixture difficulty, home advantage, and attacking ceiling.
-6. **📰 Live News & Injury Radar**: Real-time semantic radar streaming parsed articles from BBC Sport, Sky Sports, and official club medical reports.
-7. **💬 Conversational RAG Assistant**: Ask natural-language questions (e.g., *"Is Saka fit to start this weekend?"*, *"Best captain pick for GW6?"*). Injects both structured database stats and verified news documents.
-8. **🎯 Decision Confidence Score (0–100%)**: A transparent mathematical formula rating player viability based on form ($25\%$), fixture ease ($25\%$), underlying stats ($20\%$), ROI value ($15\%$), and team delta ($15\%$), penalized by injury and rotation risk.
-9. **🔍 Explainable AI Rubric**: Complete breakdown of why a score was produced, detailing positive drivers, drag factors, and applied penalties.
-10. **🔄 Live Premier League Delta Sync**: One-click sync button in the UI directly pulls live player rosters, club transfers, goals, and fixtures from the Premier League servers.
+6. **📰 News & Injury Radar**: Source-linked RSS articles and official FPL injury/availability updates, indexed in the retained ChromaDB collection for filtering and retrieval.
+7. **🎯 Decision Confidence Score (0–100%)**: A transparent Python scoring formula using form, fixture ease, underlying statistics, value, team strength where available, and injury/rotation adjustments.
+8. **🔍 Explainable scoring**: Shows score drivers, drag factors, data limitations, and applied penalties; unavailable Team Delta ratings remain N/A.
+9. **🔄 Automatic synchronization**: A worker refreshes FPL data and news independently of browser visits, records each sync attempt, and preserves saved data on upstream errors.
+10. **🏆 My Team**: Persistent squad management, XI/bench optimization, transfers, captaincy, alternatives, risk radar, form trends, and fixture timeline.
 
 ---
 
@@ -35,23 +35,19 @@ flowchart TD
     end
 
     subgraph Core Engines
-        ROUTER["Hybrid Context Retriever\n(SQLite + ChromaDB)"]
+        ROUTER["News & Injury Retrieval\n(SQLite + ChromaDB)"]
         SCORING["Decision Confidence Scoring Engine\n(0-100% Math Formulation)"]
         MCDA["Captaincy & Transfer Optimizer"]
     end
 
-    subgraph LLM & UI
-        LLM["Google Gemini / Configurable Provider\n(.env config)"]
-        STREAMLIT["Streamlit Production Dashboard\n(app.py)"]
-    end
+    STREAMLIT["Streamlit Analytics Dashboard\n(app.py)"]
 
     FPL_API --> INGEST
     NEWS_RSS --> NEWS_INGEST
     STREAMLIT --> ROUTER
     STREAMLIT --> SCORING
     STREAMLIT --> MCDA
-    ROUTER --> LLM
-    LLM --> STREAMLIT
+    ROUTER --> STREAMLIT
 ```
 
 ---
@@ -99,14 +95,9 @@ When Streamlit is running, its process-wide scheduler checks every 15 minutes on
    ```bash
    cp .env.example .env
    ```
-   Add your free Google Gemini API key from [Google AI Studio](https://aistudio.google.com/):
-   ```env
-   GEMINI_API_KEY="your_api_key_here"
-   LLM_PROVIDER="gemini"
-   ```
-   *(If left blank, the system automatically uses the offline mock reasoning engine).*
+   No AI provider credentials are needed. Keep `.env` local and untracked. Configure `FPL_SCHEDULER_MODE` and persistent data paths only when needed.
 
-4. **Sync Data & Embeddings**:
+4. **Optional initial sync** (news and FPL sync run automatically after the app/worker starts; manual commands are available):
    ```bash
    python -m src.ingestion.sync_fpl
    python -m src.ingestion.sync_news
@@ -122,15 +113,16 @@ When Streamlit is running, its process-wide scheduler checks every 15 minutes on
 
 ### Option 2: Docker Compose Deployment (Linux host with persistent disk)
 
-The Compose setup runs Streamlit and the FPL scheduler as separate containers. Both mount the
-same host data directory, and a cross-process lock prevents the scheduler and a manual UI refresh
-from writing FPL data concurrently. The scheduler checks every 15 minutes on matchdays and every
-6 hours otherwise. It runs historical player ingestion in bounded batches rather than performing
-a full backfill on each startup. The app reports worker health from its heartbeat.
+The Compose setup runs Streamlit and the scheduler worker as separate containers. Both mount the
+same host data directory. The worker refreshes FPL data every 15 minutes on matchdays and every
+6 hours otherwise, and refreshes news/injury sources at the configurable news interval (6 hours
+by default). Cross-process locks prevent duplicate FPL or news jobs. Historical player ingestion
+runs in bounded batches rather than performing a full backfill on each startup. The app reports
+worker health from its heartbeat.
 
 Use a supported Linux host where you control Docker Engine and the Compose plugin, with outbound
 HTTPS access to the FPL API, configured news sources, and Hugging Face for the embedding model
-download on first app startup. Gemini access is also needed if using the live Gemini provider.
+download on first ingestion.
 Attach a durable local block-storage filesystem; do not put SQLite WAL data on an unverified network filesystem. Docker restart
 policies cannot keep services available while the host is stopped, and a bind mount is only as
 durable as its underlying disk and backups.
@@ -138,7 +130,6 @@ durable as its underlying disk and backups.
 ```bash
 cp .env.example .env
 # Edit .env; never commit it. Set FPL_DATA_DIR to the mounted persistent disk path.
-# Keep GEMINI_API_KEY empty for offline/mock mode.
 chmod 600 .env
 sudo mkdir -p /srv/fpl-assistant/data
 # The containers run as UID/GID 10001 and need write access to this directory.
@@ -181,9 +172,9 @@ and raw source caches are kept under `/app/data` in the shared host mount. A con
 consistent backup procedure is:
 
 ```bash
-docker compose stop fpl-rag-assistant fpl-sync-worker
+docker compose stop pl-fantasy-predictor fpl-sync-worker
 sudo tar -C /srv/fpl-assistant -czf /secure-backup-location/fpl-data-$(date +%F-%H%M%S).tar.gz data
-docker compose start fpl-sync-worker fpl-rag-assistant
+docker compose start fpl-sync-worker pl-fantasy-predictor
 ```
 
 Store encrypted backups on a different disk or backup service, and monitor that backups complete.
@@ -192,31 +183,26 @@ directory, point a separate Compose project/configuration at that directory, and
 row counts plus the Chroma collection before considering it recoverable. Never extract a test
 restore over the live data path. A bind mount does not protect against disk or host loss.
 
-#### Gemini credentials and unavailable Team Delta inputs
+#### Credentials and unavailable Team Delta inputs
 
-Keep `GEMINI_API_KEY` in a permission-restricted, ignored `.env` or inject it from the host's
-secrets manager into the environment used to run Compose; do not put credentials in images,
-source control, logs, screenshots, or command arguments. The Compose file forwards the key only
-to the web app, not the FPL worker. When using `.env`, protect it from other host users and verify
-it is not tracked before deployment. Leave the value empty for offline/mock mode. Without a valid
-key the assistant uses the offline mock reasoner, which is identified in the UI. A real Gemini
-response has not been verified unless a valid key is configured and an actual provider request
-succeeds.
+The remaining app does not require an AI provider key. Keep any unrelated secrets out of source
+control and images. The official FPL API currently reports zero for all four team-strength fields
+across the 20 clubs. The app treats those ratings as unavailable: Team Delta displays `N/A` and is
+excluded from the confidence score, with remaining factor weights renormalized. Do not manually
+seed invented ratings.
 
-The official FPL API currently reports zero for all four team-strength fields across the 20
-clubs. The app treats those ratings as unavailable: Team Delta displays `N/A` and is excluded
-from the confidence score, with remaining factor weights renormalized. Do not manually seed
-invented ratings. This scoring limitation does not prevent the other app features from working.
+The missing Team Delta inputs do not prevent other app features from working.
 
 FPL scheduling is independent of browser visits but still depends on the Linux host, Docker
 daemon, attached disk, network, and upstream FPL API being available. The worker heartbeats every
-15 seconds after its startup freshness check completes; the web container waits for a healthy
+15 seconds while the scheduler process is alive, including during startup synchronization; the web container waits for a healthy
 worker before starting. A stale heartbeat makes it unhealthy, and an unexpectedly stopped
-scheduler thread causes the worker container to exit so its restart policy can recover it. Synchronization errors
-are recorded in SQLite and retried at the next scheduler interval; they do not erase existing
-records. Successful data syncs are observed by the app's 30-second last-sync watcher. News
-ingestion is available through its manual UI action; the FPL worker does not schedule news
-ingestion.
+scheduler thread causes the worker container to exit so its restart policy can recover it. FPL and
+news synchronization errors are recorded independently in SQLite and retried at the next interval;
+they do not erase existing records. The app's 30-second status watcher invalidates cached views after either FPL or news
+attempts so the UI reads committed data and current attempt status. News feeds that fail are reported
+as partial/error rather than being described as a fully successful refresh. A manual news refresh
+is also available in the Data Sync & Status panel.
 
 ---
 
@@ -239,61 +225,32 @@ Tests cover:
 
 When presenting this project to professors and evaluators, emphasize these key software engineering highlights:
 
-1. **Hybrid RAG vs Pure LLM**: Pure LLMs hallucinate football statistics and lack real-time injury context. Our system grounds every answer in a verified SQLite database and a vector database of fresh press conference reports.
-2. **Deterministic Confidence Score**: Rather than letting the LLM invent random recommendations, our `DecisionScoringEngine` computes an objective 0–100 score using statistical metrics ($xGI_{90}$, Form, FDR, PPM) with explicit penalization for injury uncertainty.
+1. **Deterministic FPL decisions**: `DecisionScoringEngine` computes transparent 0–100 scores from stored FPL statistics, form, fixtures, and availability; there is no generative model in the scoring path.
+2. **Source-backed news**: Retained ChromaDB and MiniLM retrieval index articles and injury updates with source metadata for News & Injury Radar and My Team.
 3. **Idempotent Data Sync**: The system is future-proof. Running the app 1 year from now pulls the active season's goals, transfers, and fixtures via `ON CONFLICT(id) DO UPDATE` without database corruption.
 4. **Local CPU Embeddings**: Using `all-MiniLM-L6-v2` guarantees fast (<15ms) inference on standard laptops without requiring a GPU or paid embedding API credits.
 
 ---
 
-## Phase 3 — Grounded FPL Decision Assistant
+## News and injury ingestion
 
-The AI Assistant now routes supported questions through a deterministic query-understanding layer and an orchestration service (`src/rag/query_understanding.py`, `src/rag/assistant_service.py`). It reuses the existing SQLite repository, ChromaDB collection, MiniLM embeddings, retrieval path, score engine, transfer analyzer, captain picker, and Gemini/offline providers.
+`src.ingestion.sync_news` combines current official FPL player-availability notes from SQLite with
+the configured RSS feeds. It preserves each feed's source, article URL, and publication date,
+tags known player/team entities, categorizes relevant injury records, and stores deterministic
+chunks in the existing `football_news` ChromaDB collection. Chunks are upserted by stable IDs, so
+repeated fetches update rather than multiply the same documents. News retrieval, embeddings, and
+vector storage remain part of the News & Injury Radar and My Team risk/evidence features; they do
+not invoke a conversational model.
 
-### Request flow
-
-```text
-Question → intent/player parsing → SQLite player + fixture/history lookup
-         → targeted ChromaDB news/injury retrieval → freshness ranking
-         → existing Python decision/transfer/captain scoring
-         → compact grounded context → Gemini or offline explanation
-         → structured metrics + source evidence in Streamlit
-```
-
-Structured FPL statistics and all decision scores come from SQLite and the existing Python engines. Gemini explains those outputs; it is instructed not to add facts, dates, fixtures, sources, or scores. The assistant rejects explanations containing numeric claims not present in its grounded context and falls back to a deterministic offline summary. Return dates are shown only when supported by indexed source evidence; relative dates require a dated reference. Missing evidence is reported explicitly. Evidence sources are linked only when an HTTP(S) URL is present in existing metadata.
-
-### Supported question types
-
-- Player statistics, form, availability, and fixtures
-- Two-player comparison and multi-gameweek option analysis
-- Transfer out/in analysis using both players and the existing transfer scorer
-- Captain recommendations using the existing captain ranking engine
-- Player injury/availability questions using current FPL status and source-backed return enrichment
-- Fixture, gameweek, position, and general FPL questions
-
-Short follow-ups such as “What about Saka instead?” retain the prior transfer-out player in the Streamlit session. Ambiguous player matches are surfaced for clarification rather than selected by popularity.
-
-### Gemini and offline mode
-
-Keep `GEMINI_API_KEY` in `.env` or enter it in the existing password field in the sidebar. The app continues to use the configured `LLM_PROVIDER`; when Gemini is not configured or fails, the existing mock provider keeps structured data, deterministic scores, and retrieved evidence available. API keys are not included in assistant logs or evidence context.
-
-### Example pipeline
-
-For “Should I transfer Haaland out for Gakpo?”, query parsing resolves both FPL players, retrieves both SQLite profiles and their next fixtures, searches ChromaDB separately for each player, scores both using the Python decision engine, and runs the existing transfer analyzer. The UI displays cost impact and deterministic score delta; Gemini receives the compact records and explains the trade-offs. If no matching current news exists, the assistant says so rather than substituting an article.
-
-### Tests
-
-Run the complete mocked and existing test suite from the project environment:
-
-```powershell
-pytest tests/ -v
-```
-
-Phase 3 routing/orchestration cases live in `tests/test_phase3_assistant.py`; tests mock providers, retrieval, and repository records rather than requiring live APIs or websites.
+The worker runs news refresh using `NEWS_REFRESH_INTERVAL_HOURS` (6 hours by default). The app also
+offers a manual **Fetch Latest News & Injuries** action. Each run records an independent news
+attempt, success time, and error in `ingestion_log`. Partial feed failures are visible and do not
+erase the previous saved vectors. In offline mode the dashboard continues to display the latest
+locally stored FPL and news records, marked with their actual source timestamps.
 
 ## Phase 4 — My Team & Gameweek Intelligence
 
-The **🏆 My Team** workspace extends the existing dashboard with a saved, manually managed 15-player squad. It reuses the current FPL player records (including player photos), SQLite repository, fixture data, Decision Confidence Scoring engine, captain picker, transfer analyzer, news vector store, injury enrichment, and configured Gemini/offline provider. No FPL account login is required.
+The **🏆 My Team** workspace extends the existing dashboard with a saved, manually managed 15-player squad. It reuses the current FPL player records (including player photos), SQLite repository, fixture data, Decision Confidence Scoring engine, captain picker, transfer analyzer, news vector store, and source-backed injury enrichment. No FPL account login or AI provider is required.
 
 The squad is stored in two additive SQLite tables, `my_team_settings` and `my_team_squad`. Startup initializes these tables without dropping or rebuilding any existing tables or ChromaDB data. Squad checks enforce 2 goalkeepers, 5 defenders, 5 midfielders, 3 forwards, unique players, and the three-per-club limit.
 
@@ -303,19 +260,28 @@ The squad is stored in two additive SQLite tables, `my_team_settings` and `my_te
 - Recommend a starting XI and formation using the existing deterministic score, availability/news penalties, recent minutes, and attacking involvement.
 - Review captain/vice-captain candidates, injury/squad availability, squad health, explainable risk, and fixture difficulty.
 - Evaluate single and multi-player transfers, review alternatives, and simulate hypothetical moves without changing the saved squad. Applying a transfer updates only the squad records and settings.
-- Analyze the gameweek in one action with squad-wide scores, fixtures, targeted indexed evidence, injury return details when source-backed, alternatives, and an optional grounded LLM explanation.
+- Analyze the gameweek in one action with squad-wide scores, fixtures, targeted indexed evidence, injury return details when source-backed, and alternatives.
 - Search the existing player pool with natural-language filters and inspect recent form trends and a fixture timeline.
 
 ### Phase 4 data flow
 
 ```text
 Saved squad → SQLite player/history + fixture lookup → targeted ChromaDB evidence
-            → existing Python scoring/captain/transfer engines → squad report
-            → optional Gemini explanation (or offline result) → Streamlit tabs
+            → existing Python scoring/captain/transfer engines → deterministic squad report
+            → Streamlit tabs
 ```
 
-All displayed decision scores and comparisons are computed in Python by existing engines. The optional LLM explains the prepared report and cannot set or override numeric scores. Injury return dates are only included through the existing source-backed injury parser/reconciler. If evidence is absent, the report indicates that rather than estimating a date. Transfer what-if simulations are read-only until the user explicitly applies a legal and affordable transfer.
+All displayed decision scores and comparisons are computed in Python by existing engines. Injury return dates are only included through the existing source-backed injury parser/reconciler. If evidence is absent, the report indicates that rather than estimating a date. Transfer what-if simulations are read-only until the user explicitly applies a legal and affordable transfer.
 
 ### Phase 4 tests
 
-Run `pytest tests/ -v` from the project environment. `tests/test_squad_intelligence.py` uses temporary SQLite storage and mocked repositories, vector retrieval, and providers to cover squad rules, XI/captain selection, transfer legality and simulation, injury evidence, form/risk, fixture timeline, natural-language search, and offline report behavior. No live API or news-site access is needed for tests.
+Run `pytest tests/ -v` from the project environment. `tests/test_squad_intelligence.py` uses temporary SQLite storage and mocked repositories and vector retrieval to cover squad rules, XI/captain selection, transfer legality and simulation, injury evidence, form/risk, fixture timeline, natural-language search, and deterministic report behavior. No live API or news-site access is needed for these tests.
+
+## Vercel status
+
+The existing `Dockerfile.vercel` and `VERCEL_POC.md` are an isolated proof-of-concept, not a
+verified production deployment. Streamlit WebSocket/session behavior, cold starts, durable
+SQLite/Chroma storage, and a separately running scheduler have not been proven on Vercel. A
+production Vercel deployment would require a completed interactive WebSocket test and migration
+to durable external structured and vector storage plus a separately scheduled worker and shared
+durable lock. Do not use the ephemeral POC container as the only data store.

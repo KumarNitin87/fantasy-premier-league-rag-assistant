@@ -29,8 +29,6 @@ ENV HOME=/tmp/fpl-vercel-poc/home \
     CHROMA_PERSIST_DIR=/tmp/fpl-vercel-poc/chroma \
     RAW_DATA_DIR=/tmp/fpl-vercel-poc/raw \
     FPL_SCHEDULER_MODE=external \
-    LLM_PROVIDER=mock \
-    OFFLINE_MOCK_MODE=true \
     STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 

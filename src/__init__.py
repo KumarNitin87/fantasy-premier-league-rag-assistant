@@ -1,4 +1,4 @@
 """
-Fantasy Football & Premier League RAG Assistant Source Package.
+PL Fantasy Predictor source package.
 """
 __version__ = "1.0.0"
