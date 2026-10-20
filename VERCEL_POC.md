@@ -6,11 +6,13 @@ and the Hugging Face model cache at temporary `/tmp/fpl-vercel-poc` paths. Verce
 storage is ephemeral. Do not use this POC to migrate or persist the production database, vector
 collection, or squad.
 
-The root `Dockerfile.vercel` uses the documented Vercel Container Runtime convention. For a
-single container Vercel automatically detects the file and routes traffic to it, so this POC
-does not require a `vercel.json`. The image listens on `0.0.0.0` and uses Vercel's `PORT`
-environment variable (defaulting to port 80 for local container checks). Existing `.dockerignore`
-rules exclude `.env`, virtual environments, and the `data/` directory from the build context.
+The root `Dockerfile.vercel` uses the documented Vercel Container Runtime convention.
+`vercel.json` explicitly selects the Container framework preset so this app is not detected
+as a Python Function from `app.py`. The image listens on `0.0.0.0` and uses Vercel's `PORT`
+environment variable (defaulting to port 80 for local container checks). `.vercelignore`
+excludes local secrets, environments, databases, ChromaDB files, logs, and generated artifacts
+from Vercel source uploads; `.dockerignore` applies the corresponding exclusions to the image
+build context.
 
 ## Local container check
 
