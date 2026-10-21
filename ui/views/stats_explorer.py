@@ -11,6 +11,21 @@ from ui.components.player_profile import render_player_profile
 from ui.components.score_card import render_score_card
 
 
+def _filter_player_results(players, position=None, team_id=None, max_cost=16.0, availability="All Statuses"):
+    """Apply the visible player filters consistently to search and table results."""
+    filtered = [
+        player for player in players
+        if (position is None or player.position == position)
+        and (team_id is None or player.team_id == team_id)
+        and player.cost_float <= max_cost
+    ]
+    if availability == "Available (Fit)":
+        return [player for player in filtered if player.status == "a"]
+    if availability == "Injured / Doubtful":
+        return [player for player in filtered if player.status in {"d", "i", "s", "u"}]
+    return filtered
+
+
 def render_stats_explorer(repo: FPLRepository, scoring_engine: DecisionScoringEngine):
     """Render the Player Statistics Explorer page."""
     st.header("📊 Premier League & FPL Player Statistics Explorer")
@@ -46,15 +61,6 @@ def render_stats_explorer(repo: FPLRepository, scoring_engine: DecisionScoringEn
 
     if search_query.strip():
         players = repo.search_players(search_query.strip(), limit=50)
-        # Apply the visible filters to search results too, so search and filters
-        # continue to describe the same result set.
-        players = [
-            p for p in players
-            if (selected_pos is None or p.position == selected_pos)
-            and (selected_team_id is None or p.team_id == selected_team_id)
-            and p.cost_float <= max_cost
-            and (selected_status is None or p.status == selected_status)
-        ]
     else:
         players = repo.get_players(
             position=selected_pos,
@@ -65,8 +71,13 @@ def render_stats_explorer(repo: FPLRepository, scoring_engine: DecisionScoringEn
             limit=150,
         )
 
-    if status_filter == "Injured / Doubtful":
-        players = [p for p in players if p.status in {"d", "i", "s", "u"}]
+    players = _filter_player_results(
+        players,
+        position=selected_pos,
+        team_id=selected_team_id,
+        max_cost=max_cost,
+        availability=status_filter,
+    )
 
     result_word = "player" if len(players) == 1 else "players"
     result_context = "matching your search" if search_query.strip() else "matching criteria"

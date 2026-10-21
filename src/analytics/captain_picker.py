@@ -3,7 +3,7 @@ Captaincy Recommendation Engine: Multi-criteria decision analysis (MCDA) for cap
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from src.database.models import Player, Fixture
 from src.database.repository import FPLRepository
 from src.analytics.scoring import DecisionScoringEngine, ScoreBreakdown
@@ -42,6 +42,7 @@ class CaptainPicker:
         top_n: int = 5,
         negative_news_player_ids: Optional[set] = None,
         candidate_players: Optional[List[Player]] = None,
+        fixtures_provider: Optional[Callable[[int, int], List[Fixture]]] = None,
     ) -> List[CaptainSuggestion]:
         """Rank and return top captain candidates."""
         # 1. Fetch top attacking candidates (MID & FWD, plus high scoring players)
@@ -51,7 +52,11 @@ class CaptainPicker:
 
         scored_candidates = []
         for player in eligible:
-            fxs = self.repo.get_upcoming_fixtures(team_id=player.team_id, limit=3)
+            fxs = (
+                fixtures_provider(player.team_id, 3)
+                if fixtures_provider
+                else self.repo.get_upcoming_fixtures(team_id=player.team_id, limit=3)
+            )
             if not fxs:
                 continue
 

@@ -1,7 +1,7 @@
 """Deterministic squad, XI, transfer, form, fixture, and risk analysis for Phase 4."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import re
 
 from src.analytics.captain_picker import CaptainPicker, CaptainSuggestion
@@ -75,6 +75,32 @@ class SquadReport:
     trends: List[FormTrend]
     evidence: List[Dict[str, Any]]
     injury_profiles: Dict[int, Dict[str, Any]]
+    warnings: List[str] = field(default_factory=list)
+
+
+class _SquadReportDataCache:
+    """Share read-only fixture/history results across one report calculation."""
+
+    def __init__(self, repository):
+        self.repository = repository
+        self._fixtures: Dict[int, List[Fixture]] = {}
+        self._history: Dict[int, List[Any]] = {}
+
+    def get_upcoming_fixtures(self, team_id: Optional[int] = None, limit: int = 20) -> List[Fixture]:
+        if team_id is None:
+            return self.repository.get_upcoming_fixtures(team_id=team_id, limit=limit)
+        if team_id not in self._fixtures:
+            self._fixtures[team_id] = self.repository.get_upcoming_fixtures(team_id=team_id, limit=38)
+        return self._fixtures[team_id][:limit]
+
+    def get_player_gameweek_history(self, player_id: int, limit: Optional[int] = None) -> List[Any]:
+        if player_id not in self._history:
+            self._history[player_id] = self.repository.get_player_gameweek_history(player_id, limit=5)
+        history = self._history[player_id]
+        return history[-limit:] if limit else list(history)
+
+    def __getattr__(self, name):
+        return getattr(self.repository, name)
 
 
 def validate_squad(players: Sequence[Player]) -> Tuple[bool, List[str]]:
@@ -401,30 +427,49 @@ def search_players_natural_language(query: str, repository, scoring: DecisionSco
 def build_squad_report(
     players: Sequence[Player], repository, scoring: DecisionScoringEngine, captain_picker: CaptainPicker,
     vector_store=None, bank_millions: float = 0.0,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> SquadReport:
+    analysis_data = _SquadReportDataCache(repository)
+    warnings: List[str] = []
     evidence: List[Dict[str, Any]] = []
     evidence_by_player: Dict[int, List[Dict[str, Any]]] = {}
     priority = sorted(players, key=lambda p: (p.status not in {"i", "d", "s", "u"}, p.chance_of_playing_next_round or 0, p.form))[:8]
     if vector_store:
-        for player in priority:
+        for index, player in enumerate(priority):
             query = f"{player.web_name} {player.team_name or ''} injury availability fitness return manager update minutes rotation"
             try:
                 docs = vector_store.query(query, n_results=2)
-            except Exception:
-                docs = []
-            evidence_by_player[player.id] = docs
-            evidence.extend(docs)
+            except Exception as exc:
+                warnings.append(
+                    "News and injury retrieval is unavailable for this report. Recommendations use stored FPL availability, fixtures, and gameweek history."
+                )
+                evidence_by_player[player.id] = []
+                for remaining in priority[index + 1:]:
+                    evidence_by_player[remaining.id] = []
+                if progress_callback:
+                    progress_callback(0.30, "News retrieval unavailable; continuing with FPL data")
+                break
+            else:
+                evidence_by_player[player.id] = docs
+                evidence.extend(docs)
+                if progress_callback:
+                    progress_callback(0.05 + 0.25 * (index + 1) / max(1, len(priority)), "Retrieving relevant squad news")
     else:
         evidence_by_player = {player.id: [] for player in players}
+        warnings.append(
+            "News and injury retrieval is not configured. Recommendations use stored FPL availability, fixtures, and gameweek history."
+        )
 
     negative_ids = {pid for pid, docs in evidence_by_player.items() if any(str(d.get("metadata", {}).get("severity", "")).casefold() in {"out", "injured", "doubtful"} for d in docs)}
-    xi = recommend_starting_xi(players, repository, scoring, negative_ids)
+    if progress_callback:
+        progress_callback(0.35, "Scoring players and selecting the starting XI")
+    xi = recommend_starting_xi(players, analysis_data, scoring, negative_ids)
     risks = []
     trends = []
     injury_profiles: Dict[int, Dict[str, Any]] = {}
     for player in players:
-        fixtures = repository.get_upcoming_fixtures(team_id=player.team_id, limit=5)
-        history = repository.get_player_gameweek_history(player.id, limit=5)
+        fixtures = analysis_data.get_upcoming_fixtures(team_id=player.team_id, limit=5)
+        history = analysis_data.get_player_gameweek_history(player.id, limit=5)
         risks.append(analyze_player_risk(player, fixtures, history, evidence_by_player.get(player.id, [])))
         trends.append(calculate_form_trend(player, history))
         player_docs = [d for d in evidence_by_player.get(player.id, []) if _evidence_mentions_player(d, player)]
@@ -432,9 +477,16 @@ def build_squad_report(
             candidates = [{"text": d.get("text", ""), "date": _doc_date(d), "source": d.get("metadata", {}).get("source", ""), "url": _doc_url(d), "metadata": d.get("metadata", {})} for d in player_docs]
             if player.news:
                 candidates.append({"text": player.news, "date": player.news_added, "source": "Premier League", "url": "", "metadata": {"source": "Premier League / FPL Medical Bulletin", "published_at": player.news_added or "", "player": player.web_name}})
-            reconciliation = reconcile_injury_sources(candidates, repository.get_upcoming_fixtures(team_id=player.team_id, limit=38), player.team_id)
+            reconciliation = reconcile_injury_sources(candidates, analysis_data.get_upcoming_fixtures(team_id=player.team_id, limit=38), player.team_id)
             injury_profiles[player.id] = {"reconciliation": reconciliation, "availability": player.status, "photo": player.photo_url}
-    captains = captain_picker.get_top_captains(top_n=2, negative_news_player_ids=negative_ids, candidate_players=list(players))
+        if progress_callback and (len(trends) % 3 == 0 or len(trends) == len(players)):
+            progress_callback(0.35 + 0.35 * len(trends) / max(1, len(players)), "Reviewing availability, form, and fixture risk")
+    captains = captain_picker.get_top_captains(
+        top_n=2,
+        negative_news_player_ids=negative_ids,
+        candidate_players=list(players),
+        fixtures_provider=analysis_data.get_upcoming_fixtures,
+    )
     health = squad_health_score(players, risks)
     injury_count = sum(p.status in {"i", "s", "u"} or p.chance_of_playing_next_round == 0 for p in players)
     doubtful = sum(
@@ -449,9 +501,13 @@ def build_squad_report(
     outgoing = sorted(players, key=lambda p: (xi.scores.get(p.id, 0), p.form, p.total_points))[:3]
     alternatives = {}
     for player in outgoing:
-        alternatives[player.id] = find_alternatives(player, players, repository, scoring, available_budget=bank_millions, limit=3)
+        alternatives[player.id] = find_alternatives(player, players, analysis_data, scoring, available_budget=bank_millions, limit=3)
+        if progress_callback:
+            progress_callback(0.70 + 0.10 * len(alternatives) / max(1, len(outgoing)), "Finding legal transfer alternatives")
 
-    return SquadReport(xi, captains, risks, health, injury_count, doubtful, rotation, difficult, outgoing, alternatives, trends, evidence, injury_profiles)
+    if progress_callback:
+        progress_callback(1.0, "Gameweek analysis complete")
+    return SquadReport(xi, captains, risks, health, injury_count, doubtful, rotation, difficult, outgoing, alternatives, trends, evidence, injury_profiles, warnings)
 
 
 def _doc_date(doc):

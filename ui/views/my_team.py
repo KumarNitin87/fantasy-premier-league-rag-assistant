@@ -1,6 +1,7 @@
 """Dedicated Phase 4 squad workspace built on the existing FPL data and scoring stack."""
 
 from collections import defaultdict
+import logging
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -25,6 +26,8 @@ from src.rag.source_metadata import source_date, source_url
 from ui.components.player_photo import resolve_player_photo_urls
 from ui.components.score_card import render_score_card
 
+logger = logging.getLogger(__name__)
+
 
 def render_my_team(repo, scoring_engine: DecisionScoringEngine, transfer_analyzer: TransferAnalyzer,
                    captain_picker: CaptainPicker, vector_store, retriever):
@@ -37,39 +40,53 @@ def render_my_team(repo, scoring_engine: DecisionScoringEngine, transfer_analyze
     all_players = repo.get_players(limit=700)
     player_by_id = {p.id: p for p in all_players}
     label_by_id = {p.id: f"{p.web_name} · {p.team_short_name or p.team_name} · {p.position} · £{p.cost_float:.1f}m" for p in all_players}
-    tabs = st.tabs(["Squad Overview", "Analyze My Gameweek", "Starting XI", "Transfers", "What-If Simulator", "Captain", "Alternatives", "Risk Radar", "Search & Trends", "Fixture Timeline"])
+    tabs = st.tabs(
+        ["Squad Overview", "Analyze My Gameweek", "Starting XI", "Transfers", "What-If Simulator", "Captain", "Alternatives", "Risk Radar", "Search & Trends", "Fixture Timeline"],
+        on_change="rerun",
+        key="my_team_tabs",
+    )
 
-    with tabs[0]:
-        _render_squad_editor(repo, all_players, player_by_id, label_by_id, saved_members, settings)
-        if saved_players:
-            _render_squad_summary(saved_members, settings, repo, scoring_engine)
+    if tabs[0].open:
+        with tabs[0]:
+            _render_squad_editor(repo, all_players, player_by_id, label_by_id, saved_members, settings)
+            if saved_players:
+                _render_squad_summary(saved_members, settings, repo, scoring_engine)
 
-    with tabs[1]:
-        _render_gameweek_analysis(repo, saved_players, settings, scoring_engine, captain_picker, vector_store, player_by_id)
+    if tabs[1].open:
+        with tabs[1]:
+            _render_gameweek_analysis(repo, saved_players, settings, scoring_engine, captain_picker, vector_store, player_by_id)
 
-    with tabs[2]:
-        _render_starting_xi(repo, saved_players, scoring_engine, saved_members)
+    if tabs[2].open:
+        with tabs[2]:
+            _render_starting_xi(repo, saved_players, scoring_engine, saved_members)
 
-    with tabs[3]:
-        _render_transfer_planner(repo, saved_players, settings, player_by_id, label_by_id, scoring_engine, transfer_analyzer)
+    if tabs[3].open:
+        with tabs[3]:
+            _render_transfer_planner(repo, saved_players, settings, player_by_id, label_by_id, scoring_engine, transfer_analyzer)
 
-    with tabs[4]:
-        _render_what_if(repo, saved_players, settings, player_by_id, label_by_id, scoring_engine, transfer_analyzer)
+    if tabs[4].open:
+        with tabs[4]:
+            _render_what_if(repo, saved_players, settings, player_by_id, label_by_id, scoring_engine, transfer_analyzer)
 
-    with tabs[5]:
-        _render_captain(saved_players, scoring_engine, captain_picker)
+    if tabs[5].open:
+        with tabs[5]:
+            _render_captain(saved_players, scoring_engine, captain_picker)
 
-    with tabs[6]:
-        _render_alternatives(repo, saved_players, player_by_id, label_by_id, scoring_engine, settings)
+    if tabs[6].open:
+        with tabs[6]:
+            _render_alternatives(repo, saved_players, player_by_id, label_by_id, scoring_engine, settings)
 
-    with tabs[7]:
-        _render_risk_radar(repo, saved_players, scoring_engine, vector_store)
+    if tabs[7].open:
+        with tabs[7]:
+            _render_risk_radar(repo, saved_players, scoring_engine, vector_store)
 
-    with tabs[8]:
-        _render_player_search(repo, all_players, player_by_id, label_by_id, scoring_engine, retriever)
+    if tabs[8].open:
+        with tabs[8]:
+            _render_player_search(repo, all_players, player_by_id, label_by_id, scoring_engine, retriever)
 
-    with tabs[9]:
-        _render_fixture_timeline(repo, saved_players, all_players, label_by_id)
+    if tabs[9].open:
+        with tabs[9]:
+            _render_fixture_timeline(repo, saved_players, all_players, label_by_id)
 
 
 def _render_squad_editor(repo, players, player_by_id, labels, saved_members, settings):
@@ -205,17 +222,32 @@ def _render_gameweek_analysis(repo, players, settings, scoring, captain_picker, 
     if not valid:
         st.info("Save a valid 15-player squad first. This report will combine your stats, fixtures, risks, RAG evidence, XI, captain, and transfer options.")
         return
-    if st.button("⭐ Analyze My Gameweek", type="primary", key="analyze_my_gameweek"):
-        with st.spinner("Analyzing squad form, fixtures, risk, and relevant indexed news…"):
+    retrying = st.session_state.get("phase4_report_error", False)
+    button_label = "↻ Retry Gameweek Analysis" if retrying else "⭐ Analyze My Gameweek"
+    if st.button(button_label, type="primary", key="analyze_my_gameweek"):
+        progress = st.progress(0, text="Preparing your squad analysis…")
+        st.session_state.pop("phase4_report", None)
+        st.session_state.pop("phase4_report_error", None)
+        try:
             report = build_squad_report(
                 players, repo, scoring, captain_picker, vector_store,
                 bank_millions=settings["bank_millions"],
+                progress_callback=lambda value, message: progress.progress(value, text=message),
             )
+        except Exception:
+            logger.exception("My Team gameweek analysis failed.")
+            progress.empty()
+            st.session_state["phase4_report_error"] = True
+            st.error("Gameweek analysis could not finish because required FPL data or the database was unavailable. Retry when the data service is reachable.")
+            return
+        progress.empty()
         st.session_state["phase4_report"] = report
     report = st.session_state.get("phase4_report")
     if not report:
         st.info("Choose Analyze My Gameweek to generate the squad-aware report.")
         return
+    for warning in report.warnings:
+        st.warning(warning)
     st.markdown("## GAMEWEEK REPORT")
     cols = st.columns(4)
     cols[0].metric("Squad health", f"{report.health_score}/100")
