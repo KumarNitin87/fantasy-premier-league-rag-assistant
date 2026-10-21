@@ -1,6 +1,6 @@
 """
 View 5: Live Football News, Press Conferences & Injury Bulletins Radar.
-Integrates semantic news retrieval from ChromaDB with structured player intelligence from SQLite.
+Integrates semantic news retrieval with structured player intelligence from the configured FPL database.
 Safe, sanitized UI rendering with zero exposed raw HTML tags.
 """
 
@@ -133,7 +133,7 @@ def render_news_feed(
     # 4. Display Structured Player Card if a Player was identified
     if hybrid_context and hybrid_context.target_player:
         player = hybrid_context.target_player
-        st.markdown("### 👤 Structured Player Intelligence (Official SQLite Database)")
+        st.markdown("### 👤 Structured Player Intelligence (Official FPL Database)")
 
         chance = player.chance_of_playing_next_round if player.chance_of_playing_next_round is not None else (
             0 if player.status in ("i", "s", "u") else 100

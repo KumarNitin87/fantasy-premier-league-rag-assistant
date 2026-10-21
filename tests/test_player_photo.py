@@ -16,16 +16,14 @@ def test_photo_url_uses_the_official_fpl_code():
     )
 
 
-def test_photo_resolver_repairs_missing_code_and_updates_existing_record(monkeypatch):
+def test_photo_resolver_repairs_missing_code_in_memory_without_database_write(monkeypatch):
     player = Player(
         id=411, team_id=1, web_name="Example", first_name="Erling", second_name="Haaland",
         position="FWD", element_type=4, now_cost=150, code=None,
     )
-    updated = []
-
     class Repository:
         def update_player_photo_code(self, player_id, code, photo_url):
-            updated.append((player_id, code, photo_url))
+            raise AssertionError("Photo resolution must not write to the database")
 
     monkeypatch.setattr(player_photo, "_live_photo_codes", lambda: {411: 223094})
     monkeypatch.setattr(player_photo, "_official_photo_is_available", lambda url: True)
@@ -34,7 +32,7 @@ def test_photo_resolver_repairs_missing_code_and_updates_existing_record(monkeyp
 
     assert resolved.endswith("/p223094.png")
     assert player.code == 223094
-    assert updated[0][0:2] == (411, 223094)
+    assert player.photo_url.endswith("/p223094.png")
 
 
 def test_photo_resolver_uses_neutral_fallback_when_cdn_image_is_unavailable(monkeypatch):

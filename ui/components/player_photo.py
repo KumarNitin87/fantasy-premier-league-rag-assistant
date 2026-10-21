@@ -47,7 +47,7 @@ def _official_photo_is_available(url: str) -> bool:
 
 
 def resolve_player_photo_urls(players: Iterable[Player], repo: FPLRepository) -> Dict[int, str]:
-    """Repair invalid stored codes from live FPL data and return validated photo URLs."""
+    """Repair invalid photo codes in memory and return validated photo URLs."""
     player_list = list(players)
     invalid = [p for p in player_list if FPLClient.normalize_photo_code(p.code) is None]
     if invalid:
@@ -57,7 +57,8 @@ def resolve_player_photo_urls(players: Iterable[Player], repo: FPLRepository) ->
             if code is None:
                 continue
             url = FPLClient.build_photo_url(code)
-            repo.update_player_photo_code(player.id, code, url)
+            # Rendering a dashboard must remain read-only against the configured
+            # database. Keep the repaired code on this in-memory model only.
             player.code = code
             player.photo_url = url
 

@@ -123,7 +123,7 @@ def _render_squad_editor(repo, players, player_by_id, labels, saved_members, set
                                            player.id == captain_id, player.id == vice_id))
             repo.save_my_team(members, bank, free_transfers)
             st.session_state.pop("phase4_report", None)
-            st.success("Your squad and settings were saved to the existing SQLite database.")
+            st.success("Your squad and settings were saved to the configured FPL database.")
             st.rerun()
 
 
@@ -447,7 +447,7 @@ def _render_player_search(repo, players, player_by_id, labels, scoring, retrieve
     if not query:
         return
     results = search_players_natural_language(query, repo, scoring, limit=30)
-    st.caption(f"{len(results)} matching players · filters are applied from SQLite FPL fields, stored fixtures/FDR, and gameweek history.")
+    st.caption(f"{len(results)} matching players · filters are applied from FPL fields, stored fixtures/FDR, and gameweek history.")
     _render_cards([item["player"] for item in results[:12]], repo)
     for item in results:
         p = item["player"]

@@ -46,6 +46,7 @@ class FakeRepo:
         self.players = players or valid_players()
         self.teams = [Team(i, f"Club {i}", f"C{i}") for i in range(1, 6)]
         self.fixtures = []
+        self.fixture_lookup_team_ids = []
         fid = 1
         for gameweek in range(6, 12):
             for team_id in range(1, 6):
@@ -57,6 +58,8 @@ class FakeRepo:
                 fid += 1
         self.history = {p.id: [SimpleNamespace(round=n, total_points=n + 2, minutes=90 - n * 5) for n in range(1, 6)] for p in self.players}
     def get_upcoming_fixtures(self, team_id=None, limit=20):
+        if team_id is not None:
+            self.fixture_lookup_team_ids.append(team_id)
         rows = [f for f in self.fixtures if team_id is None or team_id in (f.team_h, f.team_a)]
         return rows[:limit]
     def get_player_gameweek_history(self, player_id, limit=None):
@@ -171,13 +174,15 @@ def test_what_if_evaluation_does_not_persist_saved_team():
 def test_alternatives_filter_position_budget_and_current_squad():
     squad = valid_players()
     target = make_player(30, "MID", 3, name="Affordable Mid")
+    same_team_target = make_player(33, "MID", 3, name="Another Affordable Mid")
     too_costly = make_player(31, "MID", 5, name="Too Costly")
     too_costly.now_cost = 200
     other_position = make_player(32, "DEF", 4, name="Defender")
-    repo = FakeRepo(squad + [target, too_costly, other_position])
+    repo = FakeRepo(squad + [target, same_team_target, too_costly, other_position])
     alternatives = find_alternatives(squad[7], squad, repo, DecisionScoringEngine(), 5, limit=8)
     assert all(p.position == "MID" and p.id not in {x.id for x in squad} for p, _ in alternatives)
     assert too_costly not in [p for p, _ in alternatives]
+    assert repo.fixture_lookup_team_ids.count(3) == 1
 
 
 def test_natural_language_player_filters_apply_sqlite_fields():

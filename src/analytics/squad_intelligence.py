@@ -329,12 +329,15 @@ def find_alternatives(
     squad_counts[outgoing.team_id] = max(0, squad_counts.get(outgoing.team_id, 0) - 1)
     candidates = repository.get_players(position=outgoing.position, max_price=outgoing.cost_float + available_budget, limit=700)
     scored = []
+    fixtures_by_team = {}
     for player in candidates:
         if player.id in squad_ids or player.id == outgoing.id:
             continue
         if squad_counts.get(player.team_id, 0) >= 3:
             continue
-        fixtures = repository.get_upcoming_fixtures(team_id=player.team_id, limit=5)
+        if player.team_id not in fixtures_by_team:
+            fixtures_by_team[player.team_id] = repository.get_upcoming_fixtures(team_id=player.team_id, limit=5)
+        fixtures = fixtures_by_team[player.team_id]
         if not fixtures or player.status in {"i", "s", "u"}:
             continue
         score = scoring.evaluate_player(player, fixtures).final_score

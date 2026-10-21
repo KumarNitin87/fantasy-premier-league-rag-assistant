@@ -37,7 +37,7 @@ def _last_sync_display(stats, raw_data_dir: Path = settings.RAW_DATA_DIR):
 
 def render_phase2_dashboard(repo: FPLRepository, scoring_engine: DecisionScoringEngine):
     st.header("🏆 Dashboard – Overview & Top Players")
-    st.caption("Live stats from the SQLite store with official Premier League player photos.")
+    st.caption("Live stats from the configured FPL database with official Premier League player photos.")
 
     # Summary cards
     stats = repo.get_db_stats()
