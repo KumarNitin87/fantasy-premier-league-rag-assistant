@@ -1,0 +1,6 @@
+# Minimal dependencies for the short-lived FPL-only GitHub Actions job.
+requests==2.34.2
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+psycopg[binary]==3.3.6

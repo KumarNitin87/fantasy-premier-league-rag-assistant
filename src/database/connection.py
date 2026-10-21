@@ -6,12 +6,19 @@ Phase 2: Added `code` and `photo_url` columns to players table.
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Generator
+from typing import Any, Generator
 from config.settings import settings
 
 
-def get_connection(db_path: Path = settings.SQLITE_DB_PATH) -> sqlite3.Connection:
-    """Create a configured SQLite database connection with row factory and WAL mode."""
+def _uses_postgres(db_path: Path) -> bool:
+    return bool(settings.DATABASE_URL) and Path(db_path) == settings.SQLITE_DB_PATH
+
+
+def get_connection(db_path: Path = settings.SQLITE_DB_PATH) -> Any:
+    """Create a configured local SQLite or hosted Postgres connection."""
+    if _uses_postgres(db_path):
+        from src.database.postgres import PostgresConnection
+        return PostgresConnection(settings.DATABASE_URL)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -21,7 +28,7 @@ def get_connection(db_path: Path = settings.SQLITE_DB_PATH) -> sqlite3.Connectio
 
 
 @contextmanager
-def db_session(db_path: Path = settings.SQLITE_DB_PATH) -> Generator[sqlite3.Connection, None, None]:
+def db_session(db_path: Path = settings.SQLITE_DB_PATH) -> Generator[Any, None, None]:
     """Context manager for atomic database operations with automatic commit/rollback."""
     conn = get_connection(db_path)
     try:
@@ -35,9 +42,18 @@ def db_session(db_path: Path = settings.SQLITE_DB_PATH) -> Generator[sqlite3.Con
 
 
 def init_db(db_path: Path = settings.SQLITE_DB_PATH) -> None:
-    """Initialize SQLite database tables and indexes. Idempotent — safe to call multiple times."""
+    """Initialize local SQLite or apply the versioned Postgres schema once."""
     with db_session(db_path) as conn:
         cursor = conn.cursor()
+        is_postgres = _uses_postgres(db_path)
+        if is_postgres:
+            cursor.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                migration_name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );""")
+            if conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?;", (1,)).fetchone():
+                return
 
         # 1. Teams
         cursor.execute("""
@@ -251,11 +267,23 @@ def init_db(db_path: Path = settings.SQLITE_DB_PATH) -> None:
             );
         """)
         cursor.execute("INSERT OR IGNORE INTO my_team_settings (id, bank_millions, free_transfers) VALUES (1, 0.0, 1);")
+        if is_postgres:
+            cursor.execute(
+                "INSERT INTO schema_migrations (version, migration_name) VALUES (?, ?) ON CONFLICT (version) DO NOTHING;",
+                (1, "core_fpl_schema"),
+            )
 
 
 def _add_column_if_missing(cursor: sqlite3.Cursor, table: str, column: str, col_type: str) -> None:
     """Safely add a column to an existing table if it does not already exist (migration helper)."""
-    cursor.execute(f"PRAGMA table_info({table});")
+    if getattr(cursor, "is_postgres", False):
+        cursor.execute(
+            "SELECT column_name AS name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?;",
+            (table,),
+        )
+    else:
+        cursor.execute(f"PRAGMA table_info({table});")
     existing = [row["name"] for row in cursor.fetchall()]
     if column not in existing:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type};")

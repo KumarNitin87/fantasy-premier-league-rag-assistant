@@ -4,13 +4,37 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import ContextManager, Iterator
+from config.settings import settings
 
 
 @contextmanager
 def acquire_sync_lock(database_path: Path, sync_name: str) -> Iterator[bool]:
-    """Try to hold a non-blocking OS lock shared by web and worker processes."""
+    """Try a shared Postgres lock for hosted runs or an OS lock locally."""
     if not sync_name.isidentifier():
         raise ValueError("sync_name must be a simple identifier")
+    if settings.DATABASE_URL and Path(database_path) == settings.SQLITE_DB_PATH:
+        from src.database.connection import get_connection
+
+        # A session-level lock is shared by the Community Cloud app and external
+        # GitHub Actions runner, unlike a lock file on either ephemeral machine.
+        lock_key = 4815162000 if sync_name == "fpl" else 4815162001
+        connection = get_connection(database_path)
+        acquired = False
+        try:
+            acquired = bool(connection.execute("SELECT pg_try_advisory_lock(?);", (lock_key,)).fetchone()[0])
+            connection.commit()
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    connection.execute("SELECT pg_advisory_unlock(?);", (lock_key,))
+                    connection.commit()
+                finally:
+                    connection.close()
+            else:
+                connection.close()
+        return
+
     lock_path = Path(f"{database_path}.{sync_name}-sync.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_file:

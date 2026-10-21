@@ -176,3 +176,11 @@ class ChromaVectorStore:
             metadata={"hnsw:space": "cosine"},
         )
         logger.info("Reset collection '%s'", self.collection_name)
+
+
+def get_configured_vector_store():
+    """Select durable Postgres vectors for hosted runs and Chroma locally."""
+    if settings.DATABASE_URL:
+        from src.rag.postgres_vector_store import PostgresVectorStore
+        return PostgresVectorStore()
+    return ChromaVectorStore()

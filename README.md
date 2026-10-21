@@ -277,11 +277,68 @@ All displayed decision scores and comparisons are computed in Python by existing
 
 Run `pytest tests/ -v` from the project environment. `tests/test_squad_intelligence.py` uses temporary SQLite storage and mocked repositories and vector retrieval to cover squad rules, XI/captain selection, transfer legality and simulation, injury evidence, form/risk, fixture timeline, natural-language search, and deterministic report behavior. No live API or news-site access is needed for these tests.
 
-## Vercel status
+## Streamlit Community Cloud
 
-The existing `Dockerfile.vercel` and `VERCEL_POC.md` are an isolated proof-of-concept, not a
-verified production deployment. Streamlit WebSocket/session behavior, cold starts, durable
-SQLite/Chroma storage, and a separately running scheduler have not been proven on Vercel. A
-production Vercel deployment would require a completed interactive WebSocket test and migration
-to durable external structured and vector storage plus a separately scheduled worker and shared
-durable lock. Do not use the ephemeral POC container as the only data store.
+The root entry point is `app.py`, and Community Cloud runs the app from the repository root. Local development continues to use SQLite and ChromaDB. Hosted runs use a single Neon Postgres database for the existing relational schema and a `pgvector` table for the retained news/injury search. The repository pattern, feature calculations, source metadata, and local SQLite mode remain in place.
+
+### Persistent storage and free-tier limits
+
+The currently published Neon Free plan lists 1 GB storage and 100 compute-hours per project per month. Neon supports `pgvector` on every plan and scales compute to zero after five idle minutes. The free plan is suitable for the current small dataset, but has no uptime SLA; cold starts and monthly compute limits apply. Monitor usage in Neon. Do not treat Streamlit's local filesystem as durable storage.
+
+The app still needs Neon to be reachable for cloud data. If it is unavailable, the app shows a connection diagnostic rather than claiming an empty database is healthy. Offline local development remains available from the saved SQLite/Chroma data. News vectors are actively used by News & Injury Radar and My Team risk/gameweek analysis, so hosted deployment preserves vector search in pgvector.
+
+### Prepare the data safely
+
+1. Create a Neon project on the Free plan and copy its pooled Postgres connection string from the Neon **Connect** dialog. Keep it private.
+2. Stop the local Streamlit app so SQLite and Chroma are no longer being written.
+3. Copy the complete local `data/` directory to a separate backup location outside the repository. Keep both `fpl_historical.db` and the complete `chroma_data/` directory. Do not commit or upload either runtime store to GitHub.
+4. Run a read-only inspection from the repository root:
+
+   ```bash
+   python scripts/migrate_to_postgres.py --dry-run
+   ```
+
+   It checks SQLite integrity, record counts, duplicate natural keys, vector dimensions and a logical source fingerprint. It does not connect to or write to Neon.
+5. Set `DATABASE_URL` in your local process environment or private `.env` file, then run the migration with the separate backup directory from step 3:
+
+   ```bash
+   python scripts/migrate_to_postgres.py --execute --backup-dir "C:/path/to/backup/data"
+   ```
+
+   The tool verifies the backup's content fingerprint, refuses a nonempty unrecognized destination, creates the schema, imports stable IDs and existing 384-dimensional Chroma embeddings in one transaction, repairs serial sequences, checks counts and representative rows, and records an idempotency marker. On error, the destination transaction rolls back and the source remains read-only. It does not automatically migrate data at app startup.
+
+Keep the local `data/` source and separate backup unchanged until you have checked the migrated counts and live app. Before production use, also make a Neon `pg_dump` backup and verify a restore into a separate empty test database. Neon free snapshots have limited recovery windows and are not a substitute for an independent backup.
+
+### Configure GitHub Actions and Streamlit secrets
+
+The scheduled workflow is `.github/workflows/fpl-sync.yml`. It runs an FPL-only job on 15-minute best-effort ticks, then checks fixture/sync state so FPL refreshes remain 15 minutes on matchdays and six hours otherwise. **The 15-minute interval is the intended check cadence, not a guaranteed real-time update interval:** GitHub Actions may start scheduled runs late or drop them during periods of high load. Fresh FPL points and match data keep their own 15-minute matchday cadence; this is not slowed to reduce news ingestion.
+
+A separate job fetches news and injury evidence every six hours (within the requested 3–6-hour window). It has its own schedule and concurrency group, so reducing news runs does not change FPL refresh timing. Both jobs use the same Postgres database; database advisory locks coordinate them with the app's manual refresh buttons. The workflow does not run a worker inside Streamlit.
+
+GitHub scheduled workflows run only from the default branch, so this workflow becomes active after its PR is merged to `main`. Scheduled Actions may be delayed or dropped during high load; the 15-minute FPL cadence is best-effort and is not a real-time guarantee. A quarter-hour FPL check can start up to 96 times per day (about 2,880 runner minutes/month if each run takes one billed minute); the separate six-hour news job starts four times per day (about 120 billed minutes/month at one minute per run). Standard Actions minutes are free for public repositories. GitHub Free private repositories include 2,000 Linux runner minutes/month, so the FPL schedule may exceed that allowance depending on billed job duration. Confirm repository visibility and Actions quota before relying on it. Public-repository schedules can also be disabled after 60 days without repository activity.
+
+Add this **Actions Secret** in GitHub repository settings:
+
+```text
+DATABASE_URL = the Neon pooled Postgres connection string
+```
+
+In Streamlit Community Cloud, create an app from the repository, choose branch `streamlit-cloud-poc`, entry point `app.py`, and Python `3.11`. Under the app's **Settings → Secrets**, add:
+
+```toml
+DATABASE_URL = "the Neon pooled Postgres connection string"
+FPL_SCHEDULER_MODE = "external"
+```
+
+The only required secret is `DATABASE_URL`; the scheduler setting is optional because hosted mode disables the embedded scheduler automatically. Never paste the connection string into chat or commit it. `requirements.txt` is pinned to the versions installed in the verified local Python 3.11 environment; no `packages.txt` or system package is required by the code.
+
+### Deploy and verify
+
+1. Push the Community Cloud branch and open the pull request to `main`.
+2. Create the Streamlit Community Cloud app using the repository, branch, and entry point above. Set Python 3.11 in Advanced settings before deploying.
+3. Add the Streamlit secret before the first app run. Add the GitHub Actions secret before the first workflow run.
+4. Complete the safe initial migration before expecting player data. If the configured database is empty, the app displays a migration diagnostic instead of fabricated zero-player statistics.
+5. After the branch is merged, inspect GitHub Actions runs and confirm one FPL sync and one news sync. Then check player counts, fixture status, Recent Form, news source links, saved squad and sync timestamps in the app.
+6. Verify a second migration attempt reports `already_migrated`, and test backups by restoring into separate databases only.
+
+If a sync fails, the last successful relational/news records remain intact; failure status is stored separately and retried on a later scheduled attempt. If Neon has scaled to zero, the first request can be slower. If GitHub schedules stop, check whether Actions was disabled after inactivity, confirm the workflow is on `main`, and manually dispatch it from the Actions tab.

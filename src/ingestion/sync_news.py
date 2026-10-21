@@ -35,8 +35,8 @@ class NewsIngestionPipeline:
         self.rss_client = rss_client or RSSNewsClient()
         self.chunker = chunker or FootballNewsChunker()
         if vector_store is None:
-            from src.rag.vector_store import ChromaVectorStore
-            vector_store = ChromaVectorStore()
+            from src.rag.vector_store import get_configured_vector_store
+            vector_store = get_configured_vector_store()
         self.vector_store = vector_store
         self.repo = repository or FPLRepository()
 
