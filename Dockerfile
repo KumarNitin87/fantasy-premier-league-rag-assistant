@@ -27,5 +27,5 @@ USER 10001:10001
 # Expose Streamlit default port
 EXPOSE 8501
 
-# Compose runs ingestion in a dedicated worker and keeps Streamlit as the web process.
+# Compose runs FPL and news ingestion in a dedicated worker.
 CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]

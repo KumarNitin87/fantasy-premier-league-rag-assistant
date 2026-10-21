@@ -41,7 +41,13 @@ env/
 # Databases and Chroma
 data/fpl_historical.db
 data/fpl_historical.db-*
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
 *.fpl-sync.lock
+*.news-sync.lock
+**/.fpl_scheduler_heartbeat
 data/chroma_data/
 data/raw/
 
@@ -69,3 +75,4 @@ htmlcov/
 test_out.txt
 test_write.py
 .streamlit/secrets.toml
+s -ExecutionPolicy*

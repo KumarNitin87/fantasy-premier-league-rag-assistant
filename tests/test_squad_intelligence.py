@@ -216,7 +216,7 @@ def test_risk_radar_uses_explicit_injury_and_rotation_evidence():
     assert "minutes" in risk.reasons["Rotation"]
 
 
-def test_gameweek_analysis_combines_rag_scores_xi_risks_and_fallback():
+def test_gameweek_analysis_combines_deterministic_scores_xi_risks_and_news_evidence():
     players = valid_players()
     repo = FakeRepo(players)
     doc = {"id": "news1", "text": "Player1 had a minor fitness concern.", "similarity": .85,
@@ -224,22 +224,12 @@ def test_gameweek_analysis_combines_rag_scores_xi_risks_and_fallback():
     vector = MagicMock()
     vector.query.return_value = [doc]
     picker = CaptainPicker(repo, DecisionScoringEngine())
-    llm = MagicMock()
-    llm.generate_response.side_effect = RuntimeError("offline")
-    report = build_squad_report(players, repo, DecisionScoringEngine(), picker, vector, llm)
+    report = build_squad_report(players, repo, DecisionScoringEngine(), picker, vector)
     assert len(report.xi.starting) == 11
     assert len(report.captains) == 2
     assert report.evidence
     assert report.health_score <= 100
-    assert report.explanation.startswith("Offline mode")
-
-
-def test_report_explanation_rejects_unsupported_numeric_claims():
-    players = valid_players()
-    llm = MagicMock()
-    llm.generate_response.return_value = "Your squad has 987 players."
-    report = build_squad_report(players, FakeRepo(players), DecisionScoringEngine(), CaptainPicker(FakeRepo(players), DecisionScoringEngine()), llm_provider=llm)
-    assert "unsupported numeric information" in report.explanation
+    assert not hasattr(report, "explanation")
 
 
 def test_injury_return_info_is_retained_from_source_evidence():

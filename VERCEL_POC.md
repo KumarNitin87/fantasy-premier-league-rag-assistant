@@ -1,10 +1,10 @@
 # Vercel Streamlit Compatibility POC
 
 This is an isolated compatibility test, not a production deployment. It uses the existing
-Streamlit app with mock LLM mode, disables the embedded FPL scheduler, and points SQLite,
-ChromaDB, raw caches, and the Hugging Face model cache at temporary `/tmp/fpl-vercel-poc`
-paths. Vercel container storage is ephemeral. Do not use this POC to migrate or persist the
-production database, vector collection, or squad.
+Streamlit app, disables the embedded FPL scheduler, and points SQLite, ChromaDB, raw caches,
+and the Hugging Face model cache at temporary `/tmp/fpl-vercel-poc` paths. Vercel container
+storage is ephemeral. Do not use this POC to migrate or persist the production database, vector
+collection, or squad.
 
 The root `Dockerfile.vercel` uses the documented Vercel Container Runtime convention.
 `vercel.json` explicitly selects the Container framework preset so this app is not detected
@@ -33,7 +33,7 @@ of Vercel routing, WebSocket, scale-down, or cold-start behavior.
 2. In Vercel, import/connect that repository as a **separate POC project** (do not change
    production project settings). Use the repository root as the project root and the
    `vercel-poc` branch for the test deployment.
-3. Leave app secrets unset. The image sets mock mode and uses only temporary local storage.
+3. Leave app secrets unset and use only temporary local storage.
    Do not configure production database/vector credentials or the production data mount.
 4. Deploy a preview using the Vercel Container Runtime. If the project is configured to deploy
    the selected branch as production, stop and configure an isolated Vercel project/preview

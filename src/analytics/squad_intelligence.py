@@ -75,7 +75,6 @@ class SquadReport:
     trends: List[FormTrend]
     evidence: List[Dict[str, Any]]
     injury_profiles: Dict[int, Dict[str, Any]]
-    explanation: str = ""
 
 
 def validate_squad(players: Sequence[Player]) -> Tuple[bool, List[str]]:
@@ -398,7 +397,7 @@ def search_players_natural_language(query: str, repository, scoring: DecisionSco
 
 def build_squad_report(
     players: Sequence[Player], repository, scoring: DecisionScoringEngine, captain_picker: CaptainPicker,
-    vector_store=None, llm_provider=None, bank_millions: float = 0.0,
+    vector_store=None, bank_millions: float = 0.0,
 ) -> SquadReport:
     evidence: List[Dict[str, Any]] = []
     evidence_by_player: Dict[int, List[Dict[str, Any]]] = {}
@@ -449,29 +448,7 @@ def build_squad_report(
     for player in outgoing:
         alternatives[player.id] = find_alternatives(player, players, repository, scoring, available_budget=bank_millions, limit=3)
 
-    report = SquadReport(xi, captains, risks, health, injury_count, doubtful, rotation, difficult, outgoing, alternatives, trends, evidence, injury_profiles)
-    if llm_provider:
-        context = _report_context(report)
-        system = "Explain this FPL squad report using only supplied data and source evidence. Do not add numbers, scores, fixtures, medical details, dates, sources or ranks. Explain Python-computed decisions; do not change them."
-        try:
-            answer = llm_provider.generate_response(context, system_instruction=system)
-            report.explanation = answer if _grounded_numbers(answer, context) else "The deterministic squad report is ready. The explanation was omitted because it included unsupported numeric information."
-        except Exception:
-            report.explanation = "Offline mode: the report below is produced by the deterministic squad and fixture engines; current news evidence is shown with sources."
-    return report
-
-
-def _report_context(report: SquadReport) -> str:
-    lines = ["SQUAD REPORT", f"Squad health: {report.health_score}/100", f"Formation: {report.xi.formation}"]
-    lines.extend(f"XI: {p.web_name}, score {report.xi.scores[p.id]}/100, FPL status {p.status}" for p in report.xi.starting)
-    lines.extend(f"Bench: {p.web_name}, score {report.xi.scores[p.id]}/100, FPL status {p.status}" for p in report.xi.bench)
-    lines.extend(f"Captain candidate {i}: {c.player.web_name}, {c.captain_index}/100, vs {c.next_opponent}, FDR {c.fdr}" for i, c in enumerate(report.captains, 1))
-    lines.extend(f"Risk: {risk.player.web_name} {category} {level}: {risk.reasons[category]}" for risk in report.risks for category, level in risk.levels.items())
-    if report.evidence:
-        lines.extend(f"Evidence: {d.get('metadata', {}).get('source', 'Unknown source')} {d.get('metadata', {}).get('published_at', 'Unknown date')} {d.get('text', '')[:700]}" for d in report.evidence[:10])
-    else:
-        lines.append("No relevant recent squad news evidence was found.")
-    return "\n".join(lines)
+    return SquadReport(xi, captains, risks, health, injury_count, doubtful, rotation, difficult, outgoing, alternatives, trends, evidence, injury_profiles)
 
 
 def _doc_date(doc):
@@ -489,10 +466,3 @@ def _evidence_mentions_player(doc, player):
     metadata = doc.get("metadata", {})
     tagged = " ".join(str(metadata.get(key, "")) for key in ("player", "player_tags", "title")).casefold()
     return player.web_name.casefold() in tagged or player.full_name.casefold() in tagged
-
-
-def _grounded_numbers(answer, context):
-    import re
-    values = set(re.findall(r"(?<![A-Za-z])\d+(?:\.\d+)?", context))
-    claims = set(re.findall(r"(?<![A-Za-z])\d+(?:\.\d+)?", answer))
-    return claims.issubset(values)

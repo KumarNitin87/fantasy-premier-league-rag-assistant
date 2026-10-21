@@ -71,8 +71,14 @@ def test_db_stats_tracks_latest_successful_fpl_and_news_sync_separately(temp_rep
     temp_repo.log_ingestion(
         sync_type="news", started_at="t3", completed_at="news-ok", status="ok"
     )
+    temp_repo.log_ingestion(
+        sync_type="news", started_at="t4", completed_at="news-partial",
+        status="partial", error="one feed unavailable",
+    )
 
     stats = temp_repo.get_db_stats()
 
     assert stats["last_sync"] == "fpl-ok"
     assert stats["last_news_sync"] == "news-ok"
+    assert stats["last_news_attempt_at"] == "news-partial"
+    assert stats["last_news_status"] == "partial"
