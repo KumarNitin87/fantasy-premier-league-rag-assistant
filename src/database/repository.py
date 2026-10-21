@@ -187,7 +187,7 @@ class FPLRepository:
         query = """
             SELECT p.*, t.name as team_name, t.short_name as team_short_name
             FROM players p JOIN teams t ON p.team_id = t.id
-            WHERE p.web_name LIKE ? OR p.first_name LIKE ? OR p.second_name LIKE ?
+            WHERE LOWER(p.web_name) LIKE LOWER(?) OR LOWER(p.first_name) LIKE LOWER(?) OR LOWER(p.second_name) LIKE LOWER(?)
             ORDER BY p.total_points DESC LIMIT ?;
         """
         with db_session(self.db_path) as conn:

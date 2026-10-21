@@ -1,0 +1,7 @@
+# News job uses the existing MiniLM embedding model and durable pgvector store.
+-r requirements-sync-fpl.txt
+feedparser==6.0.14
+beautifulsoup4==4.15.0
+sentence-transformers==6.1.0
+torch==2.14.0
+transformers==5.17.0

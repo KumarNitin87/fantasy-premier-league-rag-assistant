@@ -1,0 +1,64 @@
+name: FPL and news sync
+
+on:
+  schedule:
+    # Offset the quarter-hour schedule to reduce GitHub's top-of-hour queue delays.
+    - cron: "7/15 * * * *"
+    - cron: "11 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      sync_type:
+        description: Which sync to run
+        type: choice
+        options: [all, fpl, news]
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  fpl-sync:
+    if: github.event_name == 'schedule' && github.event.schedule == '7/15 * * * *' || github.event_name == 'workflow_dispatch' && (inputs.sync_type == 'all' || inputs.sync_type == 'fpl')
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    concurrency:
+      group: fpl-sync
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-sync-fpl.txt
+      - run: python -m pip install -r requirements-sync-fpl.txt
+      - name: Sync FPL if due
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FPL_SCHEDULER_MODE: external
+        run: python scripts/run_scheduled_sync.py --type fpl
+
+  news-sync:
+    if: github.event_name == 'schedule' && github.event.schedule == '11 */6 * * *' || github.event_name == 'workflow_dispatch' && (inputs.sync_type == 'all' || inputs.sync_type == 'news')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: news-sync
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-sync-news.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: sentence-transformers-all-MiniLM-L6-v2
+      - run: python -m pip install -r requirements-sync-news.txt
+      - name: Sync news and injury evidence if due
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FPL_SCHEDULER_MODE: external
+        run: python scripts/run_scheduled_sync.py --type news

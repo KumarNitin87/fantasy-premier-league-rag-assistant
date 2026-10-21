@@ -27,6 +27,10 @@ class Settings(BaseSettings):
 
     FPL_SCHEDULER_MODE: Literal["embedded", "external"] = "embedded"
 
+    # Optional durable Postgres backend for hosted deployments. When unset, local
+    # development continues to use the SQLite database below.
+    DATABASE_URL: str | None = None
+
     # Storage Paths
     SQLITE_DB_PATH: Path = BASE_DIR / "data" / "fpl_historical.db"
     CHROMA_PERSIST_DIR: Path = BASE_DIR / "data" / "chroma_data"

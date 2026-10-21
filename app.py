@@ -6,6 +6,7 @@ Main Streamlit Application Entrypoint.
 import streamlit as st
 from pathlib import Path
 import time
+import os
 
 # Streamlit Page Configuration
 st.set_page_config(
@@ -14,6 +15,18 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Streamlit Community Cloud exposes TOML secrets through st.secrets rather than
+# process environment variables. Bridge only supported configuration values
+# before importing Pydantic settings; local .env and GitHub Actions env remain valid.
+for _secret_name in ("DATABASE_URL", "FPL_SCHEDULER_MODE"):
+    if not os.environ.get(_secret_name):
+        try:
+            _secret_value = st.secrets.get(_secret_name)
+        except Exception:
+            _secret_value = None
+        if _secret_value:
+            os.environ[_secret_name] = str(_secret_value)
 
 # Custom Styling for Premier League Modern Dashboard Theme
 st.markdown("""
@@ -211,7 +224,8 @@ def get_repository() -> FPLRepository:
 
 @st.cache_resource
 def get_vector_store() -> ChromaVectorStore:
-    return ChromaVectorStore()
+    from src.rag.vector_store import get_configured_vector_store
+    return get_configured_vector_store()
 
 
 @st.cache_resource
@@ -277,20 +291,33 @@ def get_scheduler() -> FPLAutoScheduler:
         news_interval_seconds=settings.NEWS_REFRESH_INTERVAL_HOURS * 60 * 60,
         on_news_sync_success=_on_news_sync_success,
     )
-    if settings.FPL_SCHEDULER_MODE == "embedded":
+    if settings.FPL_SCHEDULER_MODE == "embedded" and not settings.DATABASE_URL:
         scheduler.start()
     else:
         scheduler.status["mode"] = "external"
     return scheduler
 
 
-repo = get_repository()
-vector_store = get_vector_store()
-scoring_engine = get_scoring_engine()
-transfer_analyzer = get_transfer_analyzer()
-captain_picker = get_captain_picker()
-retriever = HybridRetriever(vector_store=vector_store, repository=repo)
-scheduler = get_scheduler()  # ensures background thread starts on first load
+try:
+    repo = get_repository()
+    if repo.count_players() == 0:
+        if settings.DATABASE_URL:
+            st.error("The configured persistent database is reachable but has no FPL player data yet.")
+            st.info("Run the documented read-only dry-run, verify a separate backup, then perform the initial data migration.")
+        else:
+            st.error("No saved FPL data is available in this local database.")
+            st.info("Restore your local data or sync from the official FPL API. A hosted app requires DATABASE_URL and a completed data migration.")
+        st.stop()
+    vector_store = get_vector_store()
+    scoring_engine = get_scoring_engine()
+    transfer_analyzer = get_transfer_analyzer()
+    captain_picker = get_captain_picker()
+    retriever = HybridRetriever(vector_store=vector_store, repository=repo)
+    scheduler = get_scheduler()  # ensures the local background thread starts only in local mode
+except Exception as exc:
+    st.error("The app could not connect to its configured data store. Check the database setup and connection, then retry.")
+    st.caption(f"Diagnostic: {type(exc).__name__}. Connection details are intentionally hidden.")
+    st.stop()
 
 if "_visible_fpl_attempt_at" not in st.session_state:
     st.session_state["_visible_fpl_attempt_at"] = repo.get_db_stats().get("last_fpl_attempt_at")
@@ -345,16 +372,19 @@ with st.sidebar:
     with st.expander("🔄 Data Sync & Status", expanded=False):
         # ---- Auto-sync status banner ----
         sch_status = scheduler.status
-        if settings.FPL_SCHEDULER_MODE == "external":
-            heartbeat = settings.SQLITE_DB_PATH.parent / ".fpl_scheduler_heartbeat"
-            if heartbeat.exists():
-                heartbeat_age = time.time() - heartbeat.stat().st_mtime
-                if heartbeat_age < 90:
-                    st.caption(f"🤖 External FPL worker: healthy · heartbeat {int(heartbeat_age)}s ago")
-                else:
-                    st.warning(f"External FPL worker heartbeat is stale ({int(heartbeat_age)}s).")
+        if settings.DATABASE_URL or settings.FPL_SCHEDULER_MODE == "external":
+            if settings.DATABASE_URL:
+                st.caption("🤖 External GitHub Actions scheduler · health shown by saved sync attempts")
             else:
-                st.warning("External FPL worker heartbeat not found.")
+                heartbeat = settings.SQLITE_DB_PATH.parent / ".fpl_scheduler_heartbeat"
+                if heartbeat.exists():
+                    heartbeat_age = time.time() - heartbeat.stat().st_mtime
+                    if heartbeat_age < 90:
+                        st.caption(f"🤖 External FPL worker: healthy · heartbeat {int(heartbeat_age)}s ago")
+                    else:
+                        st.warning(f"External FPL worker heartbeat is stale ({int(heartbeat_age)}s).")
+                else:
+                    st.warning("External FPL worker heartbeat not found.")
         else:
             if sch_status.get("syncing_now"):
                 st.info("⏳ Auto-sync in progress…")
@@ -451,7 +481,12 @@ with st.sidebar:
             st.caption("✅ News status: Healthy")
 
         st.caption(f"News vectors: {vector_store.count()}")
-        if settings.FPL_SCHEDULER_MODE == "external":
+        if settings.DATABASE_URL:
+            st.caption(
+                f"ℹ️ External GitHub Actions cadence: FPL 15-minute best-effort checks "
+                f"(6 h between non-matchday syncs); news every {settings.NEWS_REFRESH_INTERVAL_HOURS} h."
+            )
+        elif settings.FPL_SCHEDULER_MODE == "external":
             st.caption(
                 f"ℹ️ Worker schedule: FPL every 15 min on matchdays / 6 h otherwise; "
                 f"news every {settings.NEWS_REFRESH_INTERVAL_HOURS} h."

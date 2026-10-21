@@ -392,22 +392,30 @@ def detect_matchday(repo) -> bool:
     try:
         today = datetime.now(timezone.utc).date()
         # Poll for fixtures today, any currently started match, or provisional points.
+        now = datetime.now(timezone.utc)
         with __import__("src.database.connection", fromlist=["db_session"]).db_session(repo.db_path) as conn:
             rows = conn.execute(
-                """
-                SELECT COUNT(*) FROM fixtures
-                WHERE
-                    (date(kickoff_time) = ? AND kickoff_time IS NOT NULL)
-                    OR (started = 1 AND finished = 0)
-                    OR (
-                        finished_provisional = 1
-                        AND kickoff_time IS NOT NULL
-                        AND julianday(kickoff_time) >= julianday('now', '-24 hours')
-                    )
-                """,
-                (str(today),),
-            ).fetchone()
-        return (rows[0] or 0) > 0
+                "SELECT started, finished, finished_provisional, kickoff_time FROM fixtures;"
+            ).fetchall()
+        for row in rows:
+            kickoff_value = row["kickoff_time"]
+            if not kickoff_value:
+                if row["started"] and not row["finished"]:
+                    return True
+                continue
+            try:
+                kickoff = datetime.fromisoformat(str(kickoff_value).replace("Z", "+00:00"))
+                if kickoff.tzinfo is None:
+                    kickoff = kickoff.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if kickoff.date() == today:
+                return True
+            if row["started"] and not row["finished"]:
+                return True
+            if row["finished_provisional"] and now - timedelta(hours=24) <= kickoff <= now:
+                return True
+        return False
     except Exception as exc:
         logger.warning("detect_matchday query failed: %s", exc)
         return False
