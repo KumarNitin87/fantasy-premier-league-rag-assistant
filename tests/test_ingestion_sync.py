@@ -119,7 +119,7 @@ def test_news_sync_records_successful_completion(tmp_path):
     assert repository.logs[0]["completed_at"]
 
 
-def test_news_sync_records_failure_and_preserves_exception(tmp_path):
+def test_news_sync_records_failure_without_persisting_raw_exception(tmp_path):
     pipeline, repository = make_news_pipeline(tmp_path, fail=True)
 
     with pytest.raises(RuntimeError, match="vector upsert failed"):
@@ -128,7 +128,7 @@ def test_news_sync_records_failure_and_preserves_exception(tmp_path):
     assert len(repository.logs) == 1
     assert repository.logs[0]["sync_type"] == "news"
     assert repository.logs[0]["status"] == "error"
-    assert repository.logs[0]["error"] == "RuntimeError: vector upsert failed"
+    assert repository.logs[0]["error"] == "RuntimeError: database_error"
 
 
 def test_news_sync_records_partial_feed_failure_without_claiming_full_success(tmp_path):
@@ -169,6 +169,26 @@ def test_rss_client_does_not_use_unbounded_parser_network_fallback(monkeypatch):
     assert client.fetch_all_articles() == []
     assert client.last_errors == ["Test Feed: HTTP 503"]
     assert client.last_successful_feeds == 0
+
+
+def test_rss_client_does_not_log_feed_urls_or_raw_exception_messages(caplog):
+    import logging
+
+    secret = "rss-token-do-not-log"
+    client = RSSNewsClient(feeds={
+        "Private Feed": f"https://user:{secret}@example.test/rss?token={secret}"
+    })
+
+    def fail_fetch(_url):
+        raise RuntimeError(f"password={secret}")
+
+    client._fetch_feed_content = fail_fetch
+    caplog.set_level(logging.DEBUG, logger="src.api.rss_client")
+
+    assert client.fetch_all_articles() == []
+    assert secret not in caplog.text
+    assert "example.test" not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_news_sync_preserves_missing_publication_date(tmp_path):

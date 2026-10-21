@@ -57,6 +57,10 @@ jobs:
           path: ~/.cache/huggingface/hub
           key: sentence-transformers-all-MiniLM-L6-v2
       - run: python -m pip install -r requirements-sync-news.txt
+      - name: Read-only database connectivity and schema check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_postgres_connectivity.py
       - name: Sync news and injury evidence if due
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

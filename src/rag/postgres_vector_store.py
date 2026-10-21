@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from config.settings import settings
 from src.database.connection import db_session
+from src.database.diagnostics import database_failure_category
 from src.rag.embeddings import EmbeddingEngine
 
 logger = logging.getLogger(__name__)
@@ -93,8 +94,8 @@ class PostgresVectorStore:
         try:
             with db_session() as conn:
                 rows = conn.execute(sql, params).fetchall()
-        except Exception:
-            logger.exception("Postgres vector query failed.")
+        except Exception as exc:
+            logger.error("Postgres vector query failed (category=%s).", database_failure_category(exc))
             raise
         return [
             {
