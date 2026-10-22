@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from config.settings import settings
 from src.api.rss_client import RSSNewsClient
 from src.database.repository import FPLRepository
+from src.database.diagnostics import database_failure_category
 from src.rag.chunker import FootballNewsChunker
 from src.sync.process_lock import acquire_news_sync_lock
 
@@ -58,7 +59,7 @@ class NewsIngestionPipeline:
             self._record_sync_status(
                 started_at=started_at,
                 status="error",
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {database_failure_category(exc)}",
             )
             raise
 

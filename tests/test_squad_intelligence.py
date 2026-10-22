@@ -46,6 +46,8 @@ class FakeRepo:
         self.players = players or valid_players()
         self.teams = [Team(i, f"Club {i}", f"C{i}") for i in range(1, 6)]
         self.fixtures = []
+        self.fixture_lookup_team_ids = []
+        self.history_lookup_player_ids = []
         fid = 1
         for gameweek in range(6, 12):
             for team_id in range(1, 6):
@@ -57,9 +59,12 @@ class FakeRepo:
                 fid += 1
         self.history = {p.id: [SimpleNamespace(round=n, total_points=n + 2, minutes=90 - n * 5) for n in range(1, 6)] for p in self.players}
     def get_upcoming_fixtures(self, team_id=None, limit=20):
+        if team_id is not None:
+            self.fixture_lookup_team_ids.append(team_id)
         rows = [f for f in self.fixtures if team_id is None or team_id in (f.team_h, f.team_a)]
         return rows[:limit]
     def get_player_gameweek_history(self, player_id, limit=None):
+        self.history_lookup_player_ids.append(player_id)
         rows = self.history.get(player_id, [])
         return rows[-limit:] if limit else rows
     def get_players(self, position=None, max_price=None, limit=100, **kwargs):
@@ -171,13 +176,15 @@ def test_what_if_evaluation_does_not_persist_saved_team():
 def test_alternatives_filter_position_budget_and_current_squad():
     squad = valid_players()
     target = make_player(30, "MID", 3, name="Affordable Mid")
+    same_team_target = make_player(33, "MID", 3, name="Another Affordable Mid")
     too_costly = make_player(31, "MID", 5, name="Too Costly")
     too_costly.now_cost = 200
     other_position = make_player(32, "DEF", 4, name="Defender")
-    repo = FakeRepo(squad + [target, too_costly, other_position])
+    repo = FakeRepo(squad + [target, same_team_target, too_costly, other_position])
     alternatives = find_alternatives(squad[7], squad, repo, DecisionScoringEngine(), 5, limit=8)
     assert all(p.position == "MID" and p.id not in {x.id for x in squad} for p, _ in alternatives)
     assert too_costly not in [p for p, _ in alternatives]
+    assert repo.fixture_lookup_team_ids.count(3) == 1
 
 
 def test_natural_language_player_filters_apply_sqlite_fields():
@@ -230,6 +237,84 @@ def test_gameweek_analysis_combines_deterministic_scores_xi_risks_and_news_evide
     assert report.evidence
     assert report.health_score <= 100
     assert not hasattr(report, "explanation")
+
+
+def test_gameweek_report_reuses_fixture_and_history_reads_across_sections():
+    players = valid_players()
+    repo = FakeRepo(players)
+    scoring = DecisionScoringEngine()
+
+    report = build_squad_report(players, repo, scoring, CaptainPicker(repo, scoring), MagicMock())
+
+    assert len(report.xi.starting) == 11
+    assert len(repo.fixture_lookup_team_ids) == len(set(repo.fixture_lookup_team_ids))
+    assert len(repo.fixture_lookup_team_ids) <= len({player.team_id for player in repo.players})
+    assert sorted(repo.history_lookup_player_ids) == sorted(player.id for player in players)
+
+
+def test_gameweek_report_handles_empty_optional_data_without_inventing_results():
+    players = valid_players()
+    repo = FakeRepo(players)
+    repo.fixtures = []
+    repo.history = {}
+    scoring = DecisionScoringEngine()
+
+    report = build_squad_report(players, repo, scoring, CaptainPicker(repo, scoring), vector_store=None)
+
+    assert len(report.xi.starting) == 11
+    assert report.captains == []
+    assert report.evidence == []
+    assert all(trend.average_points is None for trend in report.trends)
+    assert report.warnings
+
+
+def test_gameweek_report_surfaces_vector_failure_and_stops_retries():
+    players = valid_players()
+    repo = FakeRepo(players)
+    vector = MagicMock()
+    vector.query.side_effect = TimeoutError("vector service timeout")
+    scoring = DecisionScoringEngine()
+
+    report = build_squad_report(players, repo, scoring, CaptainPicker(repo, scoring), vector)
+
+    assert len(report.xi.starting) == 11
+    assert vector.query.call_count == 1
+    assert any("News and injury retrieval is unavailable" in warning for warning in report.warnings)
+
+
+def test_gameweek_report_propagates_required_database_failures():
+    players = valid_players()
+    repo = FakeRepo(players)
+    repo.get_upcoming_fixtures = MagicMock(side_effect=RuntimeError("database unavailable"))
+    scoring = DecisionScoringEngine()
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        build_squad_report(players, repo, scoring, CaptainPicker(repo, scoring), vector_store=None)
+
+
+def test_gameweek_report_reports_progress_during_slow_news_retrieval():
+    import time
+
+    players = valid_players()
+    repo = FakeRepo(players)
+    vector = MagicMock()
+    vector.query.side_effect = lambda *_args, **_kwargs: (time.sleep(0.01) or [])
+    progress = []
+    scoring = DecisionScoringEngine()
+
+    report = build_squad_report(
+        players,
+        repo,
+        scoring,
+        CaptainPicker(repo, scoring),
+        vector,
+        progress_callback=lambda value, message: progress.append((value, message)),
+    )
+
+    assert report.xi.starting
+    assert progress[0][0] > 0
+    assert progress[-1] == (1.0, "Gameweek analysis complete")
+    assert all(current[0] >= previous[0] for previous, current in zip(progress, progress[1:]))
 
 
 def test_injury_return_info_is_retained_from_source_evidence():

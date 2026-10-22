@@ -1,0 +1,24 @@
+name: Read-only database connectivity check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  database-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-sync-fpl.txt
+      - run: python -m pip install -r requirements-sync-fpl.txt
+      - name: Check database connection and required tables without writes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_postgres_connectivity.py

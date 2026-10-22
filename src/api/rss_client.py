@@ -66,7 +66,8 @@ class RSSNewsClient:
 
         for source_name, feed_url in self.feeds.items():
             try:
-                logger.info("Fetching RSS feed: '%s' (%s)", source_name, feed_url)
+                # Feed URLs may carry access parameters; keep logs to source labels.
+                logger.info("Fetching RSS feed: '%s'", source_name)
                 self._last_fetch_error = None
                 raw_xml = self._fetch_feed_content(feed_url)
 
@@ -80,7 +81,7 @@ class RSSNewsClient:
                 if getattr(feed, "bozo", False) and not feed.entries:
                     error = getattr(feed, "bozo_exception", "Invalid or unavailable feed response")
                     self.last_errors.append(f"{source_name}: {type(error).__name__}")
-                    logger.warning("Feed '%s' returned invalid XML or error: %s", source_name, error)
+                    logger.warning("Feed '%s' returned invalid XML or error (%s).", source_name, type(error).__name__)
                     continue
 
                 self.last_successful_feeds += 1
@@ -98,7 +99,7 @@ class RSSNewsClient:
 
             except Exception as e:
                 self.last_errors.append(f"{source_name}: {type(e).__name__}")
-                logger.warning("Failed to fetch RSS from '%s': %s (skipping and continuing)", source_name, e)
+                logger.warning("Failed to fetch RSS from '%s' (%s); skipping and continuing.", source_name, type(e).__name__)
 
         return all_articles
 
@@ -109,10 +110,10 @@ class RSSNewsClient:
             if resp.status_code == 200 and resp.text.strip():
                 return resp.text
             self._last_fetch_error = f"HTTP {resp.status_code}"
-            logger.debug("HTTP %s when fetching feed %s", resp.status_code, url)
+            logger.debug("HTTP %s when fetching a feed.", resp.status_code)
         except Exception as err:
             self._last_fetch_error = type(err).__name__
-            logger.debug("Direct request failed for %s: %s", url, err)
+            logger.debug("Direct feed request failed (%s).", type(err).__name__)
         return None
 
     @staticmethod

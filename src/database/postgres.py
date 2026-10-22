@@ -8,7 +8,32 @@ used by sqlite3 so application queries stay in the repository layer.
 from __future__ import annotations
 
 import re
+import logging
 from typing import Any, Iterable, Sequence
+
+from src.database.diagnostics import database_failure_category, safe_sqlstate
+
+logger = logging.getLogger(__name__)
+
+
+def _sql_operation(query: str) -> str:
+    """Describe the SQL verb and target without logging SQL or parameters."""
+    verb_match = re.match(r"\s*(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|SELECT|WITH|SET)\b", query, re.IGNORECASE)
+    if not verb_match:
+        return "statement"
+    verb = verb_match.group(1).upper()
+    target_match = None
+    patterns = (
+        r"\b(?:CREATE|ALTER|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bCREATE\s+EXTENSION\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+        r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bSELECT\b[\s\S]*?\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
+    )
+    for pattern in patterns:
+        target_match = re.search(pattern, query, re.IGNORECASE)
+        if target_match:
+            break
+    return f"{verb} {target_match.group(1)}" if target_match else verb
 
 
 class HybridRow:
@@ -55,11 +80,25 @@ class PostgresCursor:
         self._cursor = raw_cursor
 
     def execute(self, query: str, params: Sequence[Any] | None = None):
-        self._cursor.execute(_postgres_sql(query), tuple(params or ()))
+        try:
+            self._cursor.execute(_postgres_sql(query), tuple(params or ()))
+        except Exception as exc:
+            logger.error(
+                "PostgreSQL operation failed (operation=%s category=%s sqlstate=%s).",
+                _sql_operation(query), database_failure_category(exc), safe_sqlstate(exc) or "unavailable",
+            )
+            raise
         return self
 
     def executemany(self, query: str, seq_of_params: Iterable[Sequence[Any]]):
-        self._cursor.executemany(_postgres_sql(query), seq_of_params)
+        try:
+            self._cursor.executemany(_postgres_sql(query), seq_of_params)
+        except Exception as exc:
+            logger.error(
+                "PostgreSQL operation failed (operation=%s category=%s sqlstate=%s).",
+                _sql_operation(query), database_failure_category(exc), safe_sqlstate(exc) or "unavailable",
+            )
+            raise
         return self
 
     def fetchone(self):
@@ -87,7 +126,11 @@ class PostgresConnection:
             raise RuntimeError(
                 "The Postgres backend requires psycopg. Install the pinned requirements.txt dependencies."
             ) from exc
-        self._connection = psycopg.connect(database_url, connect_timeout=timeout_seconds)
+        try:
+            self._connection = psycopg.connect(database_url, connect_timeout=timeout_seconds)
+        except Exception as exc:
+            logger.error("PostgreSQL connection failed (category=%s).", database_failure_category(exc))
+            raise
 
     def execute(self, query: str, params: Sequence[Any] | None = None):
         cursor = self.cursor()
@@ -101,10 +144,18 @@ class PostgresConnection:
         return PostgresCursor(self._connection.cursor())
 
     def commit(self):
-        self._connection.commit()
+        try:
+            self._connection.commit()
+        except Exception as exc:
+            logger.error("PostgreSQL operation failed (operation=COMMIT category=%s).", database_failure_category(exc))
+            raise
 
     def rollback(self):
-        self._connection.rollback()
+        try:
+            self._connection.rollback()
+        except Exception as exc:
+            logger.error("PostgreSQL operation failed (operation=ROLLBACK category=%s).", database_failure_category(exc))
+            raise
 
     def close(self):
         self._connection.close()

@@ -1,7 +1,9 @@
 """Shared resolver for official FPL player photos and safe fallbacks."""
 
+import base64
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Iterable, List
+from pathlib import Path
+from typing import Dict, Iterable
 
 import requests
 import streamlit as st
@@ -10,9 +12,8 @@ from src.api.fpl_client import FPLClient
 from src.database.models import Player
 from src.database.repository import FPLRepository
 
-PHOTO_PLACEHOLDER = (
-    "https://resources.premierleague.com/premierleague/photos/players/250x250/Photo-Missing.png"
-)
+_PLACEHOLDER_PATH = Path(__file__).resolve().parents[1] / "assets" / "player-placeholder.png"
+PHOTO_PLACEHOLDER = "data:image/png;base64," + base64.b64encode(_PLACEHOLDER_PATH.read_bytes()).decode("ascii")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -35,19 +36,23 @@ def _live_photo_codes() -> Dict[int, int]:
 def _official_photo_is_available(url: str) -> bool:
     """Validate CDN responses without downloading image bodies; cache for six hours."""
     try:
-        response = requests.head(
+        response = requests.get(
             url,
-            timeout=4,
+            timeout=(3, 4),
             allow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 FPL-Assistant/1.0"},
+            headers={"User-Agent": "Mozilla/5.0 FPL-Assistant/1.0", "Range": "bytes=0-0"},
+            stream=True,
         )
-        return response.status_code == 200 and response.headers.get("content-type", "").lower().startswith("image/")
+        try:
+            return response.status_code in {200, 206} and response.headers.get("content-type", "").lower().startswith("image/")
+        finally:
+            response.close()
     except requests.RequestException:
         return False
 
 
 def resolve_player_photo_urls(players: Iterable[Player], repo: FPLRepository) -> Dict[int, str]:
-    """Repair invalid stored codes from live FPL data and return validated photo URLs."""
+    """Repair invalid photo codes in memory and return validated photo URLs."""
     player_list = list(players)
     invalid = [p for p in player_list if FPLClient.normalize_photo_code(p.code) is None]
     if invalid:
@@ -57,7 +62,8 @@ def resolve_player_photo_urls(players: Iterable[Player], repo: FPLRepository) ->
             if code is None:
                 continue
             url = FPLClient.build_photo_url(code)
-            repo.update_player_photo_code(player.id, code, url)
+            # Rendering a dashboard must remain read-only against the configured
+            # database. Keep the repaired code on this in-memory model only.
             player.code = code
             player.photo_url = url
 

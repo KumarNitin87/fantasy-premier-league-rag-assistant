@@ -10,6 +10,7 @@ from src.database.repository import FPLRepository
 from src.analytics.scoring import DecisionScoringEngine
 from config.settings import settings
 from ui.components.score_card import render_score_card
+from ui.components.player_photo import resolve_player_photo_urls
 
 
 def _last_sync_display(stats, raw_data_dir: Path = settings.RAW_DATA_DIR):
@@ -37,7 +38,7 @@ def _last_sync_display(stats, raw_data_dir: Path = settings.RAW_DATA_DIR):
 
 def render_phase2_dashboard(repo: FPLRepository, scoring_engine: DecisionScoringEngine):
     st.header("🏆 Dashboard – Overview & Top Players")
-    st.caption("Live stats from the SQLite store with official Premier League player photos.")
+    st.caption("Live stats from the configured FPL database with official Premier League player photos.")
 
     # Summary cards
     stats = repo.get_db_stats()
@@ -51,13 +52,10 @@ def render_phase2_dashboard(repo: FPLRepository, scoring_engine: DecisionScoring
     st.markdown("---")
     st.subheader("Top 10 Players by Points (with photos)")
     top_players = repo.get_players(sort_by="total_points", limit=10)
+    photo_urls = resolve_player_photo_urls(top_players, repo)
     for p in top_players:
         cols = st.columns([1, 4])
-        # Photo column – if URL missing, show placeholder
-        if p.photo_url:
-            cols[0].image(p.photo_url, width=80)
-        else:
-            cols[0].image("https://via.placeholder.com/80?text=No+Photo")
+        cols[0].image(photo_urls[p.id], width=80)
         # Info column
         with cols[1]:
             st.write(f"**{p.web_name}** – {p.team_short_name or p.team_name}")
